@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
-
 nodes_dir="local_nodes"
 echo "Looking for the first missing node file in ${nodes_dir}..."
 missing_nn=""
