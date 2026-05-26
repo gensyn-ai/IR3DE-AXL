@@ -13,4 +13,4 @@ if [[ ! "${node_id}" =~ ^[0-9]+$ ]]; then
 fi
 
 node_id="$(printf '%02d' "${node_id}")"
- ./axl/node -config "local_nodes/c${node_id}.json"
+ ./axl/node -config "local_nodes/config${node_id}.json"

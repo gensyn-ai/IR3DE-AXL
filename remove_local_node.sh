@@ -14,8 +14,8 @@ fi
 
 node_id="$(printf '%02d' "${node_id}")"
 nodes_dir="local_nodes"
-json_file="${nodes_dir}/c${node_id}.json"
-pem_file="${nodes_dir}/k${node_id}.pem"
+json_file="${nodes_dir}/config${node_id}.json"
+pem_file="${nodes_dir}/pk${node_id}.pem"
 
 if [[ ! -f "${json_file}" ]]; then
     echo "Error: node file ${json_file} does not exist." >&2
@@ -31,4 +31,4 @@ if [[ -f "${pem_file}" ]]; then
 else
     echo "Warning: private key file ${pem_file} does not exist." >&2
 fi
-echo "Node c${node_id} removed successfully."
+echo "Node config${node_id} removed successfully."
