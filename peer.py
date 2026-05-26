@@ -29,8 +29,9 @@ class Peer:
         self.ipv6_address = self.topology['our_ipv6']
         self.known_public_keys = {}
         self.awaiting_acks = {}
+        self.inactive_peers = set()
 
-        with open(f"nodes/metadata{peer_id:02d}.json", "r") as f:
+        with open(f"local_nodes/metadata{peer_id:02d}.json", "r") as f:
             metadata = json.load(f)
             self.node_name = metadata.get("node_name", f"Node {peer_id}")
     
@@ -61,16 +62,17 @@ class Peer:
                 
                 if msg.get("type") == "text":
                     log(f"From {sender[:8]}...: {msg.get('message')}", self.peer_id, msg_type="text")
+                    if sender not in self.known_public_keys:
+                        self.new_node_found(None, sender, "text")
                 
                 elif msg.get("type") in ("greeting", "greeting-ack"):
 
                     log(f"Received greeting from {sender[:8]}: {msg}", self.peer_id, msg_type=msg.get("type"))
 
                     if sender not in self.known_public_keys:
-                        log(f"New node discovered with ID = {msg.get('peer_id')}!", self.peer_id, msg_type=msg.get("type"))
-                        self.known_public_keys[sender] = msg.get("peer_id")
+                        self.new_node_found(msg.get("peer_id"), sender, msg.get("type"))
 
-                    if msg.get("type") == "greeting":
+                    if msg.get("type") == "greeting":  # Reply to greeting with greeting-ack
                         log(f"Sending greeting back to Node {msg.get('peer_id')}...", self.peer_id, msg_type="greeting-ack")
                         greetings = {
                             "msg_id": msg.get("msg_id"),
@@ -83,20 +85,19 @@ class Peer:
                     
                     if msg.get("type") == "greeting-ack" and msg.get("msg_id") in self.awaiting_acks:
                         log(f"Received ACK for greeting from Node {msg.get('peer_id')}. Removing from awaiting ACKs.", self.peer_id, msg_type="greeting-ack")
+                        self.known_public_keys[sender]["is_active"] = True
+                        self.known_public_keys[sender]["last_seen"] = time.time()
                         del self.awaiting_acks[msg.get("msg_id")]
 
                 elif msg.get("type") == "knowledge":
 
                     log(f"Received peers knowledge from {sender[:8]}: {msg}", self.peer_id, msg_type="knowledge")
                     if sender not in self.known_public_keys:
-                        log(f"New node discovered with ID = {msg.get('peer_id')}!", self.peer_id, msg_type="knowledge")
-                        self.known_public_keys[sender] = msg.get("peer_id")
-
+                        self.new_node_found(msg.get("peer_id"), sender, "knowledge")
                     new_peers = 0
                     for pk, peer_id in msg.get("known_peers", {}).items():
                         if pk not in self.known_public_keys and pk != self.public_key:
-                            log(f"New node discovered with ID = {peer_id}!", self.peer_id, msg_type="knowledge")
-                            self.known_public_keys[pk] = peer_id
+                            self.new_node_found(peer_id, pk, "knowledge")
                             new_peers += 1
                     
                     log(f"Updated known peers with knowledge from Node {msg.get('peer_id')}. New peers added: {new_peers}. Total known peers: {len(self.known_public_keys)}.", self.peer_id, msg_type="knowledge")
@@ -113,6 +114,8 @@ class Peer:
                     log(f"Received ACK for knowledge from Node {msg.get('peer_id')}.", self.peer_id, msg_type="knowledge-ack")
                     if msg.get("msg_id") in self.awaiting_acks:
                         log(f"Removing message ID {msg.get('msg_id')} from awaiting ACKs.", self.peer_id, msg_type="knowledge-ack")
+                        self.known_public_keys[sender]["is_active"] = True
+                        self.known_public_keys[sender]["last_seen"] = time.time()
                         del self.awaiting_acks[msg.get("msg_id")]
 
                 else:
@@ -120,36 +123,34 @@ class Peer:
 
             time.sleep(0.2)
 
+    def send_greeting(self, pk):
+        greetings = {
+            "msg_id": str(uuid.uuid4()),
+            "type": "greeting",
+            "from": self.public_key,
+            "peer_id": self.peer_id,
+            "message": f"Hello from node {self.peer_id}!",
+        }
+        self.send(greetings, pk)
+        self.awaiting_acks[greetings["msg_id"]] = time.time()
+
     def know_peers(self):
         
         log(f"Discovering peers in the network...", self.peer_id, msg_type=None)
-        
         if self.topology['peers'] is None:
             log(f"No peers found in the topology.", self.peer_id, msg_type=None)
             return
-        
         known_public_keys = [k['public_key'] for k in self.topology['peers']]
         greetings_sent = 0
         
-        for pk in known_public_keys:
-            
+        for pk in known_public_keys: 
             if pk in self.known_public_keys:
                 continue
-
-            greetings = {
-                "msg_id": str(uuid.uuid4()),
-                "type": "greeting",
-                "from": self.public_key,
-                "peer_id": self.peer_id,
-                "message": f"Hello from node {self.peer_id}!",
-            }
-            self.send(greetings, pk)
-            self.awaiting_acks[greetings["msg_id"]] = time.time()
+            self.send_greeting(pk)
             greetings_sent += 1
         
         log(f"Sent greetings to {greetings_sent} known peers.", self.peer_id, msg_type='greeting')
     
-
     def share_knowledge(self, num_peers_to_share=5):
         
         log(f"Sharing known peers with the network...", self.peer_id, msg_type='knowledge')
@@ -158,7 +159,7 @@ class Peer:
 
         knowledge_shared = 0
         for pk in known_pks[:num_peers_to_share]:
-            log(f"Sharing knowledge with peer {pk[:8]}, ID={self.known_public_keys[pk]}...", self.peer_id, msg_type='knowledge')
+            log(f"Sharing knowledge with peer {pk[:8]}, ID={self.known_public_keys[pk]['peer_id']}...", self.peer_id, msg_type='knowledge')
             knowledge_msg = {
                 "msg_id": str(uuid.uuid4()),
                 "type": "knowledge",
@@ -171,3 +172,19 @@ class Peer:
             knowledge_shared += 1
 
         log(f"Shared knowledge with {knowledge_shared} peers.", self.peer_id, msg_type='knowledge')
+
+    def new_node_found(self, peer_id, peer_pk, msg_type):
+        log(f"New node discovered with ID = {peer_id}!", self.peer_id, msg_type=msg_type)
+        self.known_public_keys[peer_pk] = {
+            "peer_id": peer_id,
+            "is_active": True,
+            "last_seen": time.time()
+        }
+
+    def check_inactive_peers(self, inactive_threshold=120):
+        current_time = time.time()
+        for pk, info in list(self.known_public_keys.items()):
+            if info["is_active"] and current_time - info["last_seen"] > inactive_threshold:
+                log(f"Peer {pk[:8]} (ID={info['peer_id']}) marked as inactive due to inactivity.", self.peer_id, msg_type="warning")
+                info["is_active"] = False
+                self.inactive_peers.add(pk)
