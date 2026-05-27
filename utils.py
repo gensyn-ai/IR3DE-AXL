@@ -1,24 +1,48 @@
 import ipaddress
 import time
 
-from termcolor import colored
+from rich.text import Text
 
 
+# Global reference to the RichLog widget — set by the app on mount
+_log_widget = None
+ 
+def set_log_widget(widget):
+    global _log_widget
+    _log_widget = widget
+ 
+ 
+MSG_TYPE_COLORS = {
+    "text":          "#ffffff",
+    "greeting":      "#00ffff",
+    "greeting-ack":  "#00ff00",
+    "knowledge":     "#ffff00",
+    "knowledge-ack": "#00ff00",
+    "warning":       "#ff0000",
+    "newnode":       "#ff00ff",
+}
+ 
+ 
 def log(message, node_id, msg_type=None):
     current_time = time.strftime('%H:%M:%S') + f".{int(time.time() * 1000) % 1000:03d}"
-    if msg_type is None:
-        print(f"[NODE {node_id}] [{current_time}] {message}")
+    prefix = f"[NODE {node_id}] [{current_time}] "
+ 
+    line = Text()
+    line.append(prefix, style="dim white")
+ 
+    if msg_type is not None:
+        color = MSG_TYPE_COLORS.get(msg_type, "#ffffff")
+        line.append(f"[{msg_type.upper()}]", style=f"bold {color}")
+        line.append(f" {message}", style="#ffffff")
     else:
-        color = {
-            "text": "white",
-            "greeting": "cyan",
-            "greeting-ack": "green",
-            "knowledge": "yellow",
-            "knowledge-ack": "green",
-            "warning": "red",
-            "newnode": "magenta"
-        }.get(msg_type, "white")
-        print(f"[NODE {node_id}] [{current_time}] {colored(f'[{msg_type.upper()}]', color)} {message}")
+        line.append(message, style="#ffffff")
+ 
+    if _log_widget is not None:
+        # write() is thread-safe in Textual
+        _log_widget.write(line)
+    else:
+        # Fallback if called before the UI is ready
+        print(line.plain)
 
 
 def ipv6_from_pubkey(pubkey_hex: str) -> str:
