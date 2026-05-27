@@ -149,7 +149,7 @@ class Peer:
         if self.topology['peers'] is not None:
             if all(pk['public_key'] == '' for pk in self.topology['peers']) and len(self.known_public_keys) == 0:
                 log(f"Attempted sending greetings to known peers, but all have empty public keys, meaning they are offline.", self.peer_id, msg_type=None)
-            return
+                return
 
         known_public_keys_from_topo = set([k['public_key'] for k in self.topology['peers']])
         if '' in known_public_keys_from_topo:
