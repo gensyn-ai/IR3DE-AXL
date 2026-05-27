@@ -1,3 +1,4 @@
+import pathlib
 import subprocess, uuid, requests, json, time, random
 from utils import ipv6_from_pubkey, log
 
@@ -10,11 +11,12 @@ class Peer:
     def __init__(self, peer_id, init_node=False):
 
         if init_node:
+            pathlib.Path("axl-logs").mkdir(exist_ok=True)
+            log_fp = open(f"axl-logs/node-{peer_id:02d}.log", "w", buffering=1)
             self.proc = subprocess.Popen(
                 ["./start_node.sh", str(peer_id)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
+                stdout=log_fp,
+                stderr=subprocess.STDOUT,
             )
             sleep_time = 5
             print(f"Waiting {sleep_time} seconds for node {peer_id} to initialize...")
@@ -128,11 +130,19 @@ class Peer:
         
         log(f"Discovering peers in the network...", self.peer_id, msg_type=None)
         
-        if self.topology['peers'] is None:
-            log(f"No peers found in the topology.", self.peer_id, msg_type=None)
+        if self.topology['peers'] is None and len(self.known_public_keys) == 0:
+            log(f"Attempted sending greetings to known peers, but no known public keys found.", self.peer_id, msg_type=None)
+            return
+        
+        if all(pk['public_key'] == '' for pk in self.topology['peers']) and len(self.known_public_keys) == 0:
+            log(f"Attempted sending greetings to known peers, but all have empty public keys, meaning they are offline.", self.peer_id, msg_type=None)
             return
 
-        known_public_keys = list(set([k['public_key'] for k in self.topology['peers']]) | set(list(self.known_public_keys.keys())))
+        known_public_keys_from_topo = set([k['public_key'] for k in self.topology['peers']])
+        if '' in known_public_keys_from_topo:
+            known_public_keys_from_topo.remove('')
+
+        known_public_keys = list(known_public_keys_from_topo | set(list(self.known_public_keys.keys())))
         random.shuffle(known_public_keys)
         known_public_keys = known_public_keys[:num_peers_to_greet]
 
@@ -188,6 +198,10 @@ class Peer:
         current_time = time.time()
         expired_acks = [msg_id for msg_id, info in self.awaiting_acks.items() if current_time - info['timestamp'] > timeout]
         for msg_id in expired_acks:
-            pk = self.awaiting_acks[msg_id]['receiver'][:8]
-            log(f"No ACK received from peer {pk}... with ID {self.awaiting_acks[msg_id]['receiver']} for message ID {msg_id} after {timeout} seconds.", self.peer_id, msg_type="warning")
+            pk = self.awaiting_acks[msg_id]['receiver']
+            if pk in self.known_public_keys:
+                peer_id = self.known_public_keys[self.awaiting_acks[msg_id]['receiver']]['peer_id']
+                log(f"No ACK received from peer {pk[:8]}... with ID {peer_id} for message ID {msg_id} after {timeout} seconds.", self.peer_id, msg_type="warning")
+            else:
+                log(f"No ACK received from peer {pk[:8]}... with unknown ID, for message ID {msg_id} after {timeout} seconds.", self.peer_id, msg_type="warning")
             del self.awaiting_acks[msg_id]
