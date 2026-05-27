@@ -18,6 +18,9 @@ go build -o node ./cmd/node/
 
 3) Install the conda environment:
 
+```
+conda env create -f requirements.yml
+```
 
 4) Run the simulation:
 

@@ -2,26 +2,39 @@ name: ir3deaxl
 channels:
   - defaults
 dependencies:
-  - bzip2=1.0.8=h80987f9_6
-  - ca-certificates=2026.5.14=hca03da5_0
-  - libcxx=22.1.2=hf894667_0
-  - libexpat=2.8.0=h50f4ffc_0
-  - libffi=3.4.8=hcfc0b96_2
-  - libmpdec=4.0.0=h80987f9_0
-  - libzlib=1.3.1=hb4cf58c_1
-  - lz4-c=1.9.4=h313beb8_1
-  - ncurses=6.5=hee39554_0
-  - openssl=3.5.6=ha0b305a_0
+  - _libgcc_mutex=0.1=main
+  - _openmp_mutex=5.1=52_gnu
+  - bzip2=1.0.8=h5eee18b_6
+  - ca-certificates=2026.5.14=h06a4308_0
+  - ld_impl_linux-64=2.44=h9e0c5a2_3
+  - libexpat=2.8.0=h7354ed3_0
+  - libffi=3.4.8=hc5d346e_2
+  - libgcc=15.2.0=h69a1729_8
+  - libgcc-ng=15.2.0=h166f726_8
+  - libmpdec=4.0.0=h5eee18b_0
+  - libstdcxx=15.2.0=h39759b7_8
+  - libstdcxx-ng=15.2.0=hc03a8fd_8
+  - libuuid=1.41.5=h5eee18b_0
+  - libxcb=1.17.0=h9b100fa_0
+  - libzlib=1.3.1=h47b2149_1
+  - lz4-c=1.9.4=h6a678d5_1
+  - ncurses=6.5=h7934f7d_0
+  - openssl=3.5.6=h1b28b03_0
   - pip=26.0.1=pyh0d26453_1
-  - python=3.14.4=h748c21b_100_cp314
+  - pthread-stubs=0.3=h0ce48e5_1
+  - python=3.14.4=h490e9c7_100_cp314
   - python_abi=3.14=2_cp314
-  - readline=8.3=h0b18652_0
-  - sqlite=3.51.2=h67002bf_0
-  - tk=8.6.15=hcd8a7d5_0
+  - readline=8.3=hc2a1206_0
+  - sqlite=3.51.2=h3e8d24a_0
+  - tk=8.6.15=h54e0aa7_0
   - tzdata=2026a=he532380_0
-  - xz=5.8.2=h8bbcb1d_0
-  - zlib=1.3.1=hb4cf58c_1
-  - zstd=1.5.7=h817c040_0
+  - xorg-libx11=1.8.12=h9b100fa_1
+  - xorg-libxau=1.0.12=h9b100fa_0
+  - xorg-libxdmcp=1.1.5=h9b100fa_0
+  - xorg-xorgproto=2024.1=h5eee18b_1
+  - xz=5.8.2=h448239c_0
+  - zlib=1.3.1=h47b2149_1
+  - zstd=1.5.7=h11fc155_0
   - pip:
       - certifi==2026.5.20
       - charset-normalizer==3.4.7
@@ -29,4 +42,4 @@ dependencies:
       - requests==2.34.2
       - termcolor==3.3.0
       - urllib3==2.7.0
-prefix: /Users/erosfani/miniconda3/envs/ir3deaxl
+prefix: /home/gensyn/miniconda3/envs/ir3deaxl
