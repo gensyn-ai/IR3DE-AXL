@@ -42,14 +42,26 @@ class Peer:
         topology = resp.json()
         return topology
 
-    def send(self, message, peer_public_key):
-        requests.post(
-            f"{AXL}{self.peer_id:02d}/send",
-            headers={"X-Destination-Peer-Id": peer_public_key},
-            data=json.dumps(message)
-        )
+    def send(self, message, peer_public_key, timeout=5):
+        try:
+            requests.post(
+                f"{AXL}{self.peer_id:02d}/send",
+                headers={"X-Destination-Peer-Id": peer_public_key},
+                data=json.dumps(message),
+                timeout=timeout
+            )
+        except requests.exceptions.Timeout:
+            log(f"send to {peer_public_key[:8]} timed out", self.peer_id, msg_type="warning")
+            return False
+        except requests.exceptions.RequestException as e:
+            log(f"send to {peer_public_key[:8]} failed: {e}", self.peer_id, msg_type="warning")
+            return False
+        except Exception as e:
+            log(f"Unexpected error when sending to {peer_public_key[:8]}: {e}", self.peer_id, msg_type="warning")
+            return False
+        return True
 
-    def recv_loop(self):
+    def recv_loop(self, timeout=5):
         
         while True:
             
@@ -82,7 +94,7 @@ class Peer:
                             "peer_id": self.peer_id,
                             "message": f"Hello from node {self.peer_id}!"
                         }
-                        self.send(greetings, sender)
+                        self.send(greetings, sender, timeout=timeout)
                     
                     if msg.get("type") == "greeting-ack" and msg.get("msg_id") in self.awaiting_acks:
                         log(f"Received ACK for greeting from Node {msg.get('peer_id')}. Removing from awaiting ACKs.", self.peer_id, msg_type="greeting-ack")
@@ -113,7 +125,7 @@ class Peer:
                         "from": self.public_key,
                         "peer_id": self.peer_id
                     }
-                    self.send(knowledge_ack, sender)
+                    self.send(knowledge_ack, sender, timeout=timeout)
                 
                 elif msg.get("type") == "knowledge-ack":
                     log(f"Received ACK for knowledge from Node {msg.get('peer_id')}.", self.peer_id, msg_type="knowledge-ack")
@@ -126,7 +138,7 @@ class Peer:
 
             time.sleep(0.2)
 
-    def send_greetings(self, num_peers_to_greet=5):
+    def send_greetings(self, num_peers_to_greet=5, timeout=5):
         
         log(f"Discovering peers in the network...", self.peer_id, msg_type=None)
         
@@ -134,8 +146,9 @@ class Peer:
             log(f"Attempted sending greetings to known peers, but no known public keys found.", self.peer_id, msg_type=None)
             return
         
-        if all(pk['public_key'] == '' for pk in self.topology['peers']) and len(self.known_public_keys) == 0:
-            log(f"Attempted sending greetings to known peers, but all have empty public keys, meaning they are offline.", self.peer_id, msg_type=None)
+        if self.topology['peers'] is not None:
+            if all(pk['public_key'] == '' for pk in self.topology['peers']) and len(self.known_public_keys) == 0:
+                log(f"Attempted sending greetings to known peers, but all have empty public keys, meaning they are offline.", self.peer_id, msg_type=None)
             return
 
         known_public_keys_from_topo = set([k['public_key'] for k in self.topology['peers']])
@@ -160,7 +173,10 @@ class Peer:
                 "peer_id": self.peer_id,
                 "message": f"Hello from node {self.peer_id}!",
             }
-            self.send(greetings, pk)
+            send_response =self.send(greetings, pk, timeout=timeout)
+            if not send_response:
+                continue
+
             self.awaiting_acks[greetings["msg_id"]] = {
                 "receiver": pk,
                 "timestamp": time.time()
@@ -169,7 +185,7 @@ class Peer:
         
         log(f"Sent greetings to {greetings_sent} known peers.", self.peer_id, msg_type='greeting')
 
-    def share_knowledge(self, num_peers_to_share=5):
+    def share_knowledge(self, num_peers_to_share=5, timeout=5):
         
         log(f"Sharing known peers with the network...", self.peer_id, msg_type='knowledge')
         known_pks = list(self.known_public_keys.keys())
@@ -185,7 +201,11 @@ class Peer:
                 "peer_id": self.peer_id,
                 "known_peers": self.known_public_keys
             }
-            self.send(knowledge_msg, pk)
+
+            send_response = self.send(knowledge_msg, pk, timeout=timeout)
+            if not send_response:
+                continue
+
             self.awaiting_acks[knowledge_msg["msg_id"]] = {
                 "receiver": pk,
                 "timestamp": time.time()
@@ -201,7 +221,9 @@ class Peer:
             pk = self.awaiting_acks[msg_id]['receiver']
             if pk in self.known_public_keys:
                 peer_id = self.known_public_keys[self.awaiting_acks[msg_id]['receiver']]['peer_id']
+                print(self.known_public_keys)
                 log(f"No ACK received from peer {pk[:8]}... with ID {peer_id} for message ID {msg_id} after {timeout} seconds.", self.peer_id, msg_type="warning")
             else:
+                print(self.known_public_keys)
                 log(f"No ACK received from peer {pk[:8]}... with unknown ID, for message ID {msg_id} after {timeout} seconds.", self.peer_id, msg_type="warning")
             del self.awaiting_acks[msg_id]
