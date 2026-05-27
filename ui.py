@@ -8,60 +8,12 @@ from textual.containers import Horizontal, Vertical
 from rich.text import Text
 
 
-CSS = """
-Screen {
-    background: $background;
-}
-
-Horizontal {
-    height: 1fr;
-    background: $background;
-}
-
-#left-pane, #right-pane {
-    width: 1fr;
-    height: 100%;
-    padding: 0 1;
-    background: $background;
-}
-
-#border-left, #border-right, #divider {
-    width: 1;
-    height: 100%;
-    background: #888888;
-}
-
-#left-pane, #right-pane {
-    width: 1fr;
-    height: 100%;
-    padding: 0 1;
-}
-
-RichLog {
-    background: $background;
-    scrollbar-size: 0 0;
-}
-
-#right-placeholder {
-    color: #888888;
-    width: 100%;
-    height: 100%;
-    text-align: center;
-    content-align: center middle;
-    background: $background;
-}
-
-#top-bar, #bottom-bar {
-    height: 1;
-    width: 100%;
-    color: #888888;
-    background: $background;
-}
-"""
-
+def read_css():
+    with open("style.css", "r") as f:
+        return f.read()
 
 class SimApp(App):
-    CSS = CSS
+    CSS = read_css()
     BINDINGS = [("ctrl+c", "quit", "Quit")]
 
     def __init__(self, args, target):
