@@ -6,11 +6,16 @@ from rich.text import Text
 
 # Global reference to the RichLog widget — set by the app on mount
 _log_widget = None
+_output_widget = None
  
 def set_log_widget(widget):
     global _log_widget
     _log_widget = widget
- 
+
+def set_output_widget(widget):
+    global _output_widget
+    _output_widget = widget
+
  
 MSG_TYPE_COLORS = {
     "text":          "#ffffff",
@@ -23,25 +28,25 @@ MSG_TYPE_COLORS = {
 }
  
  
-def log(message, node_id, msg_type=None):
+def log(message, node_id, msg_type=None, right=False):
     current_time = time.strftime('%H:%M:%S') + f".{int(time.time() * 1000) % 1000:03d}"
     prefix = f"[NODE {node_id}] [{current_time}] "
- 
+
     line = Text()
     line.append(prefix, style="dim white")
- 
+
     if msg_type is not None:
         color = MSG_TYPE_COLORS.get(msg_type, "#ffffff")
         line.append(f"[{msg_type.upper()}]", style=f"bold {color}")
         line.append(f" {message}", style="#ffffff")
     else:
         line.append(message, style="#ffffff")
- 
-    if _log_widget is not None:
-        # write() is thread-safe in Textual
-        _log_widget.write(line)
+
+    target = _output_widget if right else _log_widget
+
+    if target is not None:
+        target.write(line)
     else:
-        # Fallback if called before the UI is ready
         print(line.plain)
 
 

@@ -19,7 +19,7 @@ class Peer:
                 stderr=subprocess.STDOUT,
             )
             sleep_time = 5
-            print(f"Waiting {sleep_time} seconds for node {peer_id} to initialize...")
+            log(f"Waiting {sleep_time} seconds for node {peer_id} to initialize...", peer_id, msg_type=None)
             time.sleep(sleep_time)
         else:
             self.proc = None

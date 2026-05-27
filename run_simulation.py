@@ -3,7 +3,7 @@ import argparse, threading, time
 from peer import Peer
 from utils import log
  
-from ui import SimApp
+from ui import SimApp, disable_input, enable_input
 
  
 def get_args():
@@ -20,8 +20,11 @@ def get_args():
     return parser.parse_args()
  
  
-def run_peer(args, app):
+def run_peer(app, args):
     """All peer logic runs in this background thread."""
+
+    disable_input(app)
+
     peer = Peer(args.peer_id, init_node=True)
  
     # Log the peer info now that the widget is available
@@ -54,13 +57,19 @@ def run_peer(args, app):
             peer.share_knowledge(num_peers_to_share=args.num_peers_to_share, timeout=args.knowledge_timeout)
             last_share_knowledge = current_time
             time.sleep(1)
+        
+        enable_input(app, peer.peer_id)
  
         time.sleep(0.1)
- 
- 
+
+
+def handle_input(app, args, user_input):
+    log(f"User input: {user_input}", node_id="USER", msg_type=None, right=True)
+
+
 def main():
     args = get_args()
-    SimApp(args, run_peer).run()
+    SimApp(args, run_peer, handle_input).run()
  
  
 if __name__ == "__main__":

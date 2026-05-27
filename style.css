@@ -32,3 +32,15 @@ Horizontal {
     width: 100%;
     color: #888888;
 }
+
+#output {
+    height: 1fr;
+    scrollbar-size: 0 0;
+}
+
+#user-input {
+    height: 1;
+    dock: bottom;
+    border: none;
+    padding: 0;
+}
