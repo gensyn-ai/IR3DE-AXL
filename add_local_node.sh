@@ -3,6 +3,10 @@
 num_peers="${1:-1}"
 
 nodes_dir="local_nodes"
+if [[ ! -d "${nodes_dir}" ]]; then
+	echo "Creating directory ${nodes_dir} for local nodes..."
+	mkdir -p "${nodes_dir}"
+fi
 
 # FINDING FIRST MISSING NODE ID
 echo "Looking for the first missing node file in ${nodes_dir}..."
@@ -31,7 +35,11 @@ if [[ -f "${nodes_dir}/pk${missing_nn}.pem" ]]; then
     rm "${nodes_dir}/pk${missing_nn}.pem"
 fi
 
-/opt/homebrew/opt/openssl/bin/openssl genpkey -algorithm ed25519 -out "${nodes_dir}/pk${missing_nn}.pem"
+if [[ "$(uname)" == "Linux" ]]; then
+    openssl genpkey -algorithm ed25519 -out "${nodes_dir}/pk${missing_nn}.pem"
+else
+    /opt/homebrew/opt/openssl/bin/openssl genpkey -algorithm ed25519 -out "${nodes_dir}/pk${missing_nn}.pem"
+fi
 
 # BUILDING PEER LIST FROM EXISTING NODES
 candidate_ids=()
