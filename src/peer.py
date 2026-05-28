@@ -58,7 +58,7 @@ class Peer:
             if "path" in model_info: # In the future, we might want to allow only hf models
                 model, _, _ = get_llama_expert(1.15e8)
                 if os.path.isfile(model_info["path"]):
-                    log(f"Loading checkpoint from {model_info['path']}", self.peer_id, msg_type=None)
+                    log(f"Loading expert model from {model_info['path']}", self.peer_id, msg_type=None)
                     state = torch.load(model_info["path"], map_location='cpu')
                 else:
                     raise FileNotFoundError(f"Checkpoint path not found: {model_info['path']}")
