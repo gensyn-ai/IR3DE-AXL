@@ -19,12 +19,16 @@ def set_output_widget(widget):
  
 MSG_TYPE_COLORS = {
     "text":          "#ffffff",
-    "greeting":      "#00ffff",
-    "greeting-ack":  "#00ff00",
-    "knowledge":     "#ffff00",
-    "knowledge-ack": "#00ff00",
     "warning":       "#ff0000",
     "newnode":       "#ff00ff",
+    "greeting":      "#00ffff",
+    "knowledge":     "#ffff00",
+    "info":          "#0088ff",
+    "stats":         "#ff8800",
+    "greeting-ack":  "#00ff00",
+    "knowledge-ack": "#00ff00",
+    "info-ack":      "#00ff00",
+    "stats-ack":     "#00ff00",
 }
  
  

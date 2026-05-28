@@ -20,7 +20,7 @@ class LlamaWrapper(torch.nn.Module):
             intermediate_size=4 * hidden_size,
             vocab_size=vocab_size,
         )
-        config.torch_dtype = torch.bfloat16
+        config.dtype = torch.bfloat16
         config._attn_implementation = attn_implementation
         self._model = LlamaForCausalLM(config).to(dtype=torch.bfloat16)  # type: ignore
 
@@ -77,7 +77,7 @@ class LlamaWrapperWithMLPSize(torch.nn.Module):
                 intermediate_size=intermediate_size,
                 vocab_size=vocab_size,
             )
-            config.torch_dtype = torch.bfloat16
+            config.dtype = torch.bfloat16
             config._attn_implementation = attn_implementation
         
         self._model = LlamaForCausalLM(config).to(dtype=torch.bfloat16)  # type: ignore

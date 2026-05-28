@@ -47,7 +47,6 @@ def get_args():
 
 def main():
 
-    args = get_args()
     set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -93,8 +92,8 @@ def main():
         {
             "A": A.cpu(),
             "b": b.cpu(),
-            "domain_tag": TAGS_MAP[args.dataset],
-            "dataset_name": dataset_name,
+            "domain_tags": [TAGS_MAP[args.dataset]],
+            "datasets_names": [dataset_name],
             "tokenizer": "meta-llama/Meta-Llama-3-8B",
             "embedder": "meta-llama/Meta-Llama-3-8B",
         },
@@ -104,4 +103,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    args = get_args()
+    for tag in TAGS_MAP:
+        print(f"Extracting IR3DE statistics for dataset {tag}...")
+        args.dataset = tag
+        main()
