@@ -8,3 +8,11 @@ local_nodes/*.pem
 *.pyc
 axl-logs
 axl-logs/**
+models
+models/**
+datasets
+datasets/**
+__pycache__
+__pycache__/**
+logs
+logs/**

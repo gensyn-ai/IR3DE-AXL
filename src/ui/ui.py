@@ -24,7 +24,7 @@ def enable_input(app, node_id):
 
 
 def read_css():
-    with open("style.css", "r") as f:
+    with open("src/ui/style.css", "r") as f:
         return f.read()
 
 

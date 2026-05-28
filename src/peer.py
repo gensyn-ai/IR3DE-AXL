@@ -14,7 +14,7 @@ class Peer:
             pathlib.Path("axl-logs").mkdir(exist_ok=True)
             log_fp = open(f"axl-logs/node-{peer_id:02d}.log", "w", buffering=1)
             self.proc = subprocess.Popen(
-                ["./start_node.sh", str(peer_id)],
+                ["./scripts/start_node.sh", str(peer_id)],
                 stdout=log_fp,
                 stderr=subprocess.STDOUT,
             )

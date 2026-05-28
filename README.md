@@ -22,7 +22,13 @@ go build -o node ./cmd/node/
 conda env create -f requirements.yml
 ```
 
-4) Run the simulation:
+4) Download pre-trained M2D2 Llama 115M experts
+
+```
+python download_models.py
+```
+
+5) Run the simulation:
 
 ```
 python run_simulation.py --peer-id [PEER_ID]
