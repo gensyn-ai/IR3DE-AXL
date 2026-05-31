@@ -31,6 +31,7 @@ def run_peer(app, args):
             disable_input(app)
 
         peer = Peer(args.peer_id)
+        app.peer = peer
     
         # Log the peer info now that the widget is available
         log(f"Peer {peer.peer_id} - Public Key: {peer.public_key[:8]}..., IPv6: {peer.ipv6_address}", peer.peer_id)
@@ -107,6 +108,7 @@ def run_peer(app, args):
 
 def handle_input(app, args, user_input):
     log(f"User input: {user_input}", node_id="USER", msg_type=None, right=True)
+    app.peer.handle_user_input(user_input)
 
 
 def main():

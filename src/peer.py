@@ -2,6 +2,7 @@ from copy import deepcopy
 import os, pathlib, subprocess, uuid, requests, json, time, random
 
 import torch
+import torch.nn.functional as F
 from transformers import AutoTokenizer, LlamaForCausalLM
 
 from ir3de_stats.models.llama_experts import get_llama_expert
@@ -49,20 +50,20 @@ class Peer:
         # FUTURE WORK: allow the user for chosing the desired tokenizer and embedder with the UI. Using always the default for now.
         self.default_tokenizer_name = "meta-llama/Meta-Llama-3-8B"
         self.default_embedder_name = "meta-llama/Meta-Llama-3-8B"
+        self.default_lambda = 0.01  # Fixed for now
+        self.entropy_top_k = 10  # Fixed for now
+        self.max_answer_len = 128  # Fixed for now
 
-        self.A = {}
-        self.b = {}
-        for i, (stats_info, stats) in enumerate(zip(self.stats_info, self.stats)):
-            emb_dim = self.stats[i]['embedder'].weight.shape[1]
+        self.local_A = {}
+        self.local_b = {}
+        for stats_info, stats in zip(self.stats_info, self.stats):
             identifier = (stats_info['tokenizer_name'], stats_info['embedder_name'])
-            self.A[identifier] = torch.zeros((emb_dim + 1, emb_dim + 1), dtype=torch.float32, device=self.device)
-            self.b[identifier] = {}
-            for tag, b in zip(stats['tags'], stats['b']):
-                if tag not in self.b[identifier]:
-                    self.b[identifier][tag] = b
-                else:
-                    self.b[identifier][tag] += b
-        
+            self.local_A[identifier] = {}
+            self.local_b[identifier] = {}
+            for tag, A, b in zip(stats['tags'], stats['A'], stats['b']):
+                self.local_A[identifier][tag] = A
+                self.local_b[identifier][tag] = b
+
         self.chunks = {}
     
     def get_topology(self, session):
@@ -179,14 +180,9 @@ class Peer:
             
             resp = requests.get(f"{AXL}{self.peer_id:02d}/recv")
 
-            if (resp.status_code == 200
-                and len(resp.content) > 0
-                and not resp.content.startswith(b"{")):
+            if resp.status_code == 200 and len(resp.content) > 0 and not resp.content.startswith(b"{"):
+                
                 try:
-                    # log(f"/recv NON-JSON body: status={resp.status_code}, "
-                    # f"len={len(resp.content)}, first16={resp.content[:16]!r}, "
-                    # f"sender={resp.headers.get('X-From-Peer-Id', '<none>')[:8]}",
-                    # self.peer_id, msg_type="warning")
                     
                     msg = deserialize_chunk_header(resp.content)
                     
@@ -222,7 +218,7 @@ class Peer:
                                 stats = deserialize_safe([chunk for _, chunk in self.chunks[msg['pk_from']][(msg['orig_msg_id'], msg['msg_id'])]])
                                 log(f"Successfully reconstructed message ID {msg['msg_id'][:8]}... from {msg['pk_from'][:8]}... !", self.peer_id, msg_type="stats")
                                 sender = resp.headers.get("X-From-Peer-Id")
-                                self.known_public_keys[sender]["stats"] = stats
+                                self.known_public_keys[sender]["stats"] = stats['stats']  # type: ignore
 
                             except Exception as e:
                                 log(f"Failed to reconstruct message ID {msg['msg_id'][:8]}... from {msg['pk_from'][:8]}... Error: {e}", self.peer_id, msg_type="warning")
@@ -255,8 +251,34 @@ class Peer:
                     continue
                 
                 if msg.get("type") == "text":
-                    log(f"From {sender[:8]}...: {msg.get('message')}", self.peer_id, msg_type="text")
+
+                    message = msg.get('message')
+                    log(f"From {sender[:8]}...: {message}", self.peer_id, msg_type="text")
+
+                    model_utils = self.models[msg['selected_model'][1]]
+                    answer = self.generate_answer(message, model_utils)
+                    log(f"To {sender[:8]}...: {answer}", self.peer_id, msg_type="text")
+
+                    msg_id = str(uuid.uuid4())
+                    answer_msg = {
+                        "orig_msg_id": msg.get("msg_id"),
+                        "msg_id": msg_id,
+                        "type": "answer",
+                        "from": self.public_key,
+                        "peer_id": self.peer_id,
+                        "message": answer
+                    }
+                    self.send(answer_msg, sender, timeout=timeout)
                 
+                elif msg.get("type") == "answer":
+
+                    log(f"Received answer from {sender[:8]}...", self.peer_id, msg_type="text")
+                    log(f"{msg.get('message')}", msg.get("peer_id"), msg_type="text", right=True)
+
+                    if msg.get("orig_msg_id") in self.awaiting_acks:
+                        log(f"Removing message ID {msg.get('orig_msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="ir3de-ack")
+                        del self.awaiting_acks[msg.get("orig_msg_id")]
+
                 elif msg.get("type") in ("greeting", "greeting-ack"):
 
                     log(f"Received greeting from {sender[:8]}: {msg.get('message')}", self.peer_id, msg_type=msg.get("type"))
@@ -582,4 +604,163 @@ class Peer:
             "receiver": sender,
             "timestamp": time.time()
         }
-    
+
+    def get_token_router(self):
+
+        identifier = (self.default_tokenizer_name, self.default_embedder_name)
+        ref_stats = None
+        for stats_info, stats in zip(self.stats_info, self.stats):
+            if stats_info['tokenizer_name'] == self.default_tokenizer_name and stats_info['embedder_name'] == self.default_embedder_name:
+                ref_stats = stats
+                break
+        if ref_stats is None:
+            log(f"No reference stats found for tokenizer {self.default_tokenizer_name} and embedder {self.default_embedder_name}. Cannot handle user input.", self.peer_id, msg_type="warning")
+            return
+        
+        tokenizer = ref_stats['tokenizer']
+        embedder = ref_stats['embedder'].to(self.device)
+        known_tags = self.known_tags
+        emb_dim = embedder.weight.shape[1]
+        A = torch.zeros((emb_dim + 1, emb_dim + 1), dtype=torch.float32, device=self.device)
+        b_dict = {}
+        for pk in self.known_public_keys:
+            if "stats" in self.known_public_keys[pk]:
+                for stats, stats_info in zip(self.known_public_keys[pk]["stats"], self.known_public_keys[pk]["stats_info"]):
+                    if stats_info['tokenizer_name'] == self.default_tokenizer_name and stats_info['embedder_name'] == self.default_embedder_name:
+                        for tag, A_peer, b_peer in zip(stats['tags'], stats['A'], stats['b']):
+                            if tag in known_tags:
+                                A_peer = A_peer.to(self.device)
+                                b_peer = b_peer.to(self.device)
+                                A += A_peer
+                                if tag not in b_dict:
+                                    b_dict[tag] = b_peer
+                                else:
+                                    b_dict[tag] += b_peer
+                            else:
+                                log(f"Received stats with unknown tag '{tag}' from peer {pk[:8]}... New tag found!", self.peer_id, msg_type="warning")
+                                self.known_tags.append(tag)
+        
+        for tag in self.local_A[identifier]:
+            A += self.local_A[identifier][tag].to(self.device)
+            if tag not in b_dict:
+                b_dict[tag] = self.local_b[identifier][tag].to(self.device)
+            else:
+                b_dict[tag] += self.local_b[identifier][tag].to(self.device)
+
+        b = torch.zeros((emb_dim + 1, len(b_dict)), dtype=torch.float32, device=self.device)
+        for i, tag in enumerate(b_dict):
+            b[:, i] = b_dict[tag]
+        
+        W = torch.linalg.solve(A + self.default_lambda * torch.eye(A.shape[0], device=A.device), b)
+        bias = W[-1, :]
+        W = W[:-1, :]
+        norm = torch.norm(W, dim=0, keepdim=True)
+        if torch.any(norm == 0.0):
+            print("WARNING: 0 encountered in norm, substituting with 1e-6")
+            norm[norm == 0.0] = 1e-6
+        W = W / norm
+        bias = bias / norm[0, :]
+
+        router = torch.nn.Linear(W.shape[0], W.shape[1]).to(self.device)
+        router.weight.data = W.T
+        router.bias.data = bias.T
+
+        return router, tokenizer, embedder, list(b_dict.keys())
+
+
+    def find_best_tag(self, router, tokenizer, embedder, tags, user_input):
+        input_ids = tokenizer(user_input, return_tensors="pt").input_ids.to(self.device)
+        X = embedder(input_ids)
+        batch_size = X.size(0)
+        X = X.reshape(-1, X.size(-1))
+        outputs = router(X)
+        outputs = outputs.view(batch_size, -1, router.out_features)
+        probs = F.softmax(outputs, dim=2)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=2)
+        k = min(self.entropy_top_k, entropy.size(1))
+        _, idx = torch.topk(entropy, k=k, largest=False, dim=1)
+        mask = torch.zeros_like(entropy, dtype=torch.bool)
+        mask.scatter_(1, idx, True)
+        # expand indices to match last dim
+        idx_expanded = idx.unsqueeze(-1).expand(-1, -1, router.out_features)     # (16, 10, 5)
+        # gather along dim=1
+        outputs = outputs.gather(1, idx_expanded)                             # (16, 10, 5)
+        predicted_tags = torch.argmax(outputs, dim=-1)
+        assigned_tag = tags[predicted_tags.view(batch_size, -1).mode(dim=1)[0]]
+        return assigned_tag
+
+
+    def find_best_model(self, assigned_tag):
+        valid_peers = []
+        for pk in self.known_public_keys:
+            if "models_info" in self.known_public_keys[pk]:
+                for i, model_info in enumerate(self.known_public_keys[pk]["models_info"]):
+                    if assigned_tag in model_info.get("tags"):
+                        valid_peers.append((pk, i))  # using index to identify which model to use from that peer for now
+        for i, model_info in enumerate(self.models_info):
+            if assigned_tag in model_info.get("tags"):
+                valid_peers.append((None, i))  # None indicates local model
+        
+        local_models = [i for v, i in valid_peers if v is None]
+        if len(local_models) > 0:
+            log(f"Local model with tag '{assigned_tag}' found. Using the local model to process the input.", self.peer_id, msg_type="ir3de")
+            random.shuffle(local_models)
+            selected_model = (self.public_key, local_models[0])
+            return selected_model
+
+        if len(valid_peers) == 0:
+            log(f"No known peers with models matching the assigned tag '{assigned_tag}' found. Cannot handle user input.", self.peer_id, msg_type="warning")
+            return
+        
+        random.shuffle(valid_peers)
+        selected_peer = valid_peers[0]
+        log(f"Selected peer {selected_peer[0][:8]}... with model index {selected_peer[1]} to handle the user input.", self.peer_id, msg_type="ir3de")
+        
+        return selected_peer
+
+
+    def handle_user_input(self, user_input, timeout=60):
+
+        out = self.get_token_router()
+        if out is None:
+            log(f"Cannot handle user input because token router could not be constructed.", self.peer_id, msg_type="warning")
+            return
+        
+        assigned_tag = self.find_best_tag(*out, user_input)
+        log(f"User input assigned to tag '{assigned_tag}'", self.peer_id, msg_type="ir3de")
+
+        selected_model = self.find_best_model(assigned_tag)
+        if selected_model is None:
+            log(f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'.", self.peer_id, msg_type="warning")
+            return
+
+        if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
+            log(f"Handling user input locally with the local model since the selected model belongs to this node.", self.peer_id, msg_type="ir3de")
+            model_utils = self.models[selected_model[1]]
+            answer = self.generate_answer(user_input, model_utils)
+            log(f"Answer processed locally.", self.peer_id, msg_type="text")
+            log(f"{answer}", self.peer_id, msg_type="text", right=True)
+            return
+        
+        msg_id = str(uuid.uuid4())
+        msg = {
+            "msg_id": msg_id,
+            "type": "text",
+            "from": self.public_key,
+            "peer_id": self.peer_id,
+            "assigned_tag": assigned_tag,
+            "selected_model": selected_model,
+            "message": user_input
+        }
+        self.send(msg, selected_model[0], timeout=timeout)
+
+        self.awaiting_acks[msg_id] = {
+            "receiver": selected_model[0],
+            "timestamp": time.time()
+        }
+        
+    def generate_answer(self, message, model_utils):
+        input_ids = model_utils['tokenizer'](message, return_tensors='pt').to(self.device)
+        out = model_utils['model'].generate(input_ids=input_ids['input_ids'], max_length=self.max_answer_len)
+        answer = model_utils['tokenizer'].decode(out[0], skip_special_tokens=True)[len(message):]
+        return answer

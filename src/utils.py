@@ -8,7 +8,7 @@ import json
 from termcolor import colored
 
 
-ACTIVATE_UI = False
+ACTIVATE_UI = True
 
 # Global reference to the RichLog widget — set by the app on mount
 _log_widget = None
@@ -24,7 +24,7 @@ def set_output_widget(widget):
 
  
 MSG_TYPE_COLORS = {
-    "text":          "#ffffff",
+    "text":          "#E2AAF8",
     "warning":       "#ff0000",
     "newnode":       "#ff00ff",
     "greeting":      "#00ffff",
@@ -32,10 +32,12 @@ MSG_TYPE_COLORS = {
     "info":          "#0088ff",
     "stats-req":     "#ff8800",
     "stats":         "#ff8800",
+    "ir3de":         "#8800ff",
     "greeting-ack":  "#00ff00",
     "knowledge-ack": "#00ff00",
     "info-ack":      "#00ff00",
     "stats-ack":     "#00ff00",
+    "ir3de-ack":     "#00ff00",
 }
  
  
@@ -290,6 +292,7 @@ def deserialize_safe(chunks):
         obj = decode(structure)
 
     return obj
+
 
 def deserialize_chunk_header(packet):
     
