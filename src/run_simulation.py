@@ -1,26 +1,25 @@
 import os, traceback, argparse, threading, time
  
 from peer import Peer
-from utils import log
+from utils import log, ACTIVATE_UI
  
 from ui.ui import SimApp, disable_input, enable_input
-
-
-ACTIVATE_UI = True
 
  
 def get_args():
     parser = argparse.ArgumentParser(description="Test one peer locally")
     parser.add_argument("--peer-id", type=int, required=False, default=1)
     parser.add_argument("--discover-peers-interval", type=int, default=60)
-    parser.add_argument("--check-acks-interval", type=int, default=10)
+    parser.add_argument("--check-acks-interval", type=int, default=100)
     parser.add_argument("--greeting-timeout", type=int, default=60)
     parser.add_argument("--knowledge-timeout", type=int, default=60)
     parser.add_argument("--ack-timeout", type=int, default=15)
     parser.add_argument("--share-knowledge-interval", type=int, default=30)
     parser.add_argument("--num-peers-to-greet", type=int, default=5)
     parser.add_argument("--num-peers-to-share", type=int, default=5)
-    parser.add_argument("--last-share-info-interval", type=int, default=60)
+    parser.add_argument("--share-info-interval", type=int, default=60)
+    parser.add_argument("--share-stats-interval", type=int, default=60)
+    parser.add_argument("--stats-timeout", type=int, default=120)
     return parser.parse_args()
  
  
@@ -41,10 +40,12 @@ def run_peer(app, args):
     
         peer.send_greetings(num_peers_to_greet=args.num_peers_to_greet, timeout=args.greeting_timeout)
         last_greetings = time.time()
-        last_shared_info = time.time() + 2 * args.share_knowledge_interval  # Wait a little bit to share info, to increase chances of discovering peers first
         last_check_acks = time.time()
-        last_share_knowledge = time.time()
+        last_shared_knowledge = time.time()
+        last_shared_info = time.time() + 60 # 2 * args.share_knowledge_interval  # Wait a little bit to share info, to increase chances of discovering peers first
+        last_shared_stats = time.time() + 60 # 2 * args.share_knowledge_interval
         never_shared_info = True
+        never_shared_stats = True
     
         while True:
             
@@ -61,17 +62,25 @@ def run_peer(app, args):
                 time.sleep(1)
     
             current_time = time.time()
-            if current_time - last_share_knowledge >= args.share_knowledge_interval:
+            if current_time - last_shared_knowledge >= args.share_knowledge_interval:
                 peer.share_knowledge(num_peers_to_share=args.num_peers_to_share, timeout=args.knowledge_timeout)
-                last_share_knowledge = current_time
+                last_shared_knowledge = current_time
                 time.sleep(1)
 
             current_time = time.time()
-            share_info_time_to_wait = 0 if never_shared_info else args.last_share_info_interval
+            share_info_time_to_wait = 0 if never_shared_info else args.share_info_interval
             if current_time - last_shared_info >= share_info_time_to_wait:
-                peer.share_stats_and_models_info(timeout=args.ack_timeout)
+                peer.share_stats_and_models_info(num_peers_to_share=args.num_peers_to_share, timeout=args.stats_timeout)
                 last_shared_info = current_time
                 never_shared_info = False
+                time.sleep(1)
+
+            current_time = time.time()
+            share_stats_time_to_wait = 0 if never_shared_stats else args.share_stats_interval
+            if current_time - last_shared_stats >= share_stats_time_to_wait:
+                peer.ask_stats(num_peers_to_ask=args.num_peers_to_share, timeout=args.stats_timeout)
+                last_shared_stats = current_time
+                never_shared_stats = False
                 time.sleep(1)
             
             if app is not None:

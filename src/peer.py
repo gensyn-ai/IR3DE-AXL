@@ -5,7 +5,7 @@ import torch
 from transformers import AutoTokenizer, LlamaForCausalLM
 
 from ir3de_stats.models.llama_experts import get_llama_expert
-from utils import ipv6_from_pubkey, log
+from utils import ipv6_from_pubkey, log, serialize_safe, deserialize_safe, deserialize_chunk_header
 
 AXL = "http://127.0.0.1:91"
 
@@ -45,6 +45,25 @@ class Peer:
         self.models = self.get_models_info()
         self.stats_info = metadata.get("stats", [])
         self.stats = self.get_stats_info()
+
+        # FUTURE WORK: allow the user for chosing the desired tokenizer and embedder with the UI. Using always the default for now.
+        self.default_tokenizer_name = "meta-llama/Meta-Llama-3-8B"
+        self.default_embedder_name = "meta-llama/Meta-Llama-3-8B"
+
+        self.A = {}
+        self.b = {}
+        for i, (stats_info, stats) in enumerate(zip(self.stats_info, self.stats)):
+            emb_dim = self.stats[i]['embedder'].weight.shape[1]
+            identifier = (stats_info['tokenizer_name'], stats_info['embedder_name'])
+            self.A[identifier] = torch.zeros((emb_dim + 1, emb_dim + 1), dtype=torch.float32, device=self.device)
+            self.b[identifier] = {}
+            for tag, b in zip(stats['tags'], stats['b']):
+                if tag not in self.b[identifier]:
+                    self.b[identifier][tag] = b
+                else:
+                    self.b[identifier][tag] += b
+        
+        self.chunks = {}
     
     def get_topology(self, session):
         resp = session.get(f"{AXL}{self.peer_id:02d}/topology", timeout=5)
@@ -87,11 +106,13 @@ class Peer:
 
     def get_stats_info(self):
         all_stats = []
-        for stats in self.stats_info:
+        for i, stats in enumerate(self.stats_info):
             stats_data = torch.load(stats["path"], map_location='cpu')
             tokenizer = AutoTokenizer.from_pretrained(stats_data["tokenizer"])
             model = LlamaForCausalLM.from_pretrained(stats_data["embedder"])
             embedder = deepcopy(model.model.embed_tokens).to(torch.float32)
+            self.stats_info[i]['tokenizer_name'] = stats_data["tokenizer"]
+            self.stats_info[i]['embedder_name'] = stats_data["embedder"]
             A = stats_data["A"]
             b = stats_data["b"]
             all_stats.append({
@@ -108,14 +129,34 @@ class Peer:
                     self.known_tags.append(tag)
         return all_stats
 
-    def send(self, message, peer_public_key, timeout=5):
+    def send(self, message, peer_public_key, timeout=5, large=False):
         try:
-            requests.post(
-                f"{AXL}{self.peer_id:02d}/send",
-                headers={"X-Destination-Peer-Id": peer_public_key},
-                data=json.dumps(message),
-                timeout=timeout
-            )
+            if not large:
+                requests.post(
+                    f"{AXL}{self.peer_id:02d}/send",
+                    headers={"X-Destination-Peer-Id": peer_public_key},
+                    data=json.dumps(message),
+                    timeout=timeout
+                )
+            else:
+                orig_msg_id = message.get("orig_msg_id")
+                msg_id = message.get("msg_id")
+                msg_type = message.get("type")
+                pk_from = self.public_key
+                pk_to = peer_public_key
+                chunks, chunks_msg_ids = serialize_safe(message, orig_msg_id, msg_id, msg_type, pk_from, pk_to)
+                for i, chunk in enumerate(chunks):
+                    log(f"Sending chunk {i+1}/{len(chunks)} to {peer_public_key[:8]}...", self.peer_id, msg_type="stats")
+                    requests.post(
+                        f"{AXL}{self.peer_id:02d}/send",
+                        headers={"X-Destination-Peer-Id": peer_public_key},
+                        data=chunk,
+                        timeout=timeout
+                    )
+                    self.awaiting_acks[chunks_msg_ids[i]] = {
+                        "receiver": pk_to,
+                        "timestamp": time.time()
+                    }
         except requests.exceptions.Timeout:
             log(f"send to {peer_public_key[:8]} timed out. msg_id = {message.get('msg_id')}, msg_type = {message.get('type')}", self.peer_id, msg_type="warning")
             return False
@@ -132,17 +173,86 @@ class Peer:
         self.known_public_keys[sender] = {}
         self.known_public_keys[sender]["peer_id"] = msg.get("peer_id")
 
-    def recv_loop(self, timeout=5):
+    def recv_loop(self, timeout=120):
         
         while True:
             
             resp = requests.get(f"{AXL}{self.peer_id:02d}/recv")
+
+            if (resp.status_code == 200
+                and len(resp.content) > 0
+                and not resp.content.startswith(b"{")):
+                try:
+                    # log(f"/recv NON-JSON body: status={resp.status_code}, "
+                    # f"len={len(resp.content)}, first16={resp.content[:16]!r}, "
+                    # f"sender={resp.headers.get('X-From-Peer-Id', '<none>')[:8]}",
+                    # self.peer_id, msg_type="warning")
+                    
+                    msg = deserialize_chunk_header(resp.content)
+                    
+                    if msg['msg_type'] == 'stats':
+                        
+                        if msg['pk_from'] not in self.chunks:
+                            self.chunks[msg['pk_from']] = {}
+                        
+                        if (msg['orig_msg_id'], msg['msg_id']) not in self.chunks[msg['pk_from']]:
+                            self.chunks[msg['pk_from']][(msg['orig_msg_id'], msg['msg_id'])] = []
+                        
+                        if msg['chunk_idx'] not in [idx for idx, _ in self.chunks[msg['pk_from']][(msg['orig_msg_id'], msg['msg_id'])]]:
+                            self.chunks[msg['pk_from']][(msg['orig_msg_id'], msg['msg_id'])].append((msg['chunk_idx'], resp.content))
+                        else:
+                            log(f"Received duplicate chunk {msg['chunk_idx']} for message ID {msg['msg_id'][:8]}... from {msg['pk_from'][:8]}... Ignoring duplicate chunk.", self.peer_id, msg_type="warning")
+                        
+                        log(f"Received chunk {msg['chunk_idx']} for message ID {msg['msg_id'][:8]}... from {msg['pk_from'][:8]}... Total chunks received for this message: {len(self.chunks[msg['pk_from']][(msg['orig_msg_id'], msg['msg_id'])])}", self.peer_id, msg_type="stats")
+                        
+                        stats_ack = {
+                            "msg_id": msg.get("chunk_msg_id"),
+                            "type": "stats-ack",
+                            "from": self.public_key,
+                            "peer_id": self.peer_id
+                        }
+
+                        self.send(stats_ack, msg['pk_from'], timeout=timeout)
+
+                        if len(self.chunks[msg['pk_from']][(msg['orig_msg_id'], msg['msg_id'])]) == msg["num_chunks"]:
+                            
+                            log(f"All chunks received for message ID {msg['msg_id'][:8]}... from {msg['pk_from'][:8]}... Reconstructing message...", self.peer_id, msg_type="stats")
+                            
+                            try:
+                                stats = deserialize_safe([chunk for _, chunk in self.chunks[msg['pk_from']][(msg['orig_msg_id'], msg['msg_id'])]])
+                                log(f"Successfully reconstructed message ID {msg['msg_id'][:8]}... from {msg['pk_from'][:8]}... !", self.peer_id, msg_type="stats")
+                                sender = resp.headers.get("X-From-Peer-Id")
+                                self.known_public_keys[sender]["stats"] = stats
+
+                            except Exception as e:
+                                log(f"Failed to reconstruct message ID {msg['msg_id'][:8]}... from {msg['pk_from'][:8]}... Error: {e}", self.peer_id, msg_type="warning")
+                            
+                            del self.chunks[msg['pk_from']][(msg['orig_msg_id'], msg['msg_id'])]
+
+                    else:
+                        log(f"Received non-JSON message with unknown type {msg.get('type')} from {msg.get('pk_from')[:8]}... Ignoring.", self.peer_id, msg_type="warning")
+
+                except Exception as e:
+                    log(f"Failed to deserialize received message: {e}. Ignoring. Message content (truncated): {str(resp.content)[:100]}...", self.peer_id, msg_type="warning")
+                    continue
             
-            if resp.status_code == 200:
+            elif resp.status_code == 200:
                 
                 sender = resp.headers.get("X-From-Peer-Id")
-                assert sender is not None
-                msg = json.loads(resp.text)
+                if sender is None:
+                    log(f"Received message without sender information. Ignoring. Message content (truncated): {str(resp.text)[:100]}...", self.peer_id, msg_type="warning")
+                    continue
+                if resp.text is None or resp.text == "":
+                    log(f"Received empty message from {sender[:8]}.... Ignoring.", self.peer_id, msg_type="warning")
+                    continue
+                try:
+                    msg = json.loads(resp.text)
+                except json.JSONDecodeError:
+                    log(f"Failed to decode JSON message from {sender[:8]}.... Ignoring. Message content (truncated): {str(resp.text)[:100]}...", self.peer_id, msg_type="warning")
+                    continue
+                except Exception as e:
+                    log(f"Unexpected error when decoding message from {sender[:8]}: {e}. Ignoring. Message content (truncated): {str(resp.text)[:100]}...", self.peer_id, msg_type="warning")
+                    continue
                 
                 if msg.get("type") == "text":
                     log(f"From {sender[:8]}...: {msg.get('message')}", self.peer_id, msg_type="text")
@@ -223,16 +333,32 @@ class Peer:
                     }
                     self.send(info_ack, sender, timeout=timeout)
                 
+                elif msg.get("type") == "stats-req":
+
+                    tokenizer_name = msg.get("tokenizer_name")
+                    embedder_name = msg.get("embedder_name")
+                    log(f"Received stats request from {sender[:8]} for tokenizer {tokenizer_name} and embedder {embedder_name}.", self.peer_id, msg_type="stats-req")
+                    if sender not in self.known_public_keys:
+                        self.new_peer_discovered(msg, sender)
+
+                    self.share_stats(msg.get("msg_id"), tokenizer_name, embedder_name, sender, timeout=timeout)
+
                 elif msg.get("type") == "knowledge-ack":
                     log(f"Received ACK for knowledge from Node {msg.get('peer_id')}.", self.peer_id, msg_type="knowledge-ack")
                     if msg.get("msg_id") in self.awaiting_acks:
-                        log(f"Removing message ID {msg.get('msg_id')} from awaiting ACKs.", self.peer_id, msg_type="knowledge-ack")
+                        log(f"Removing message ID {msg.get('msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="knowledge-ack")
                         del self.awaiting_acks[msg.get("msg_id")]
 
                 elif msg.get("type") == "info-ack":
                     log(f"Received ACK for model and stats info from Node {msg.get('peer_id')}.", self.peer_id, msg_type="info-ack")
                     if msg.get("msg_id") in self.awaiting_acks:
-                        log(f"Removing message ID {msg.get('msg_id')} from awaiting ACKs.", self.peer_id, msg_type="info-ack")
+                        log(f"Removing message ID {msg.get('msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="info-ack")
+                        del self.awaiting_acks[msg.get("msg_id")]
+
+                elif msg.get("type") == "stats-ack":
+                    log(f"Received ACK for stats from Node {msg.get('peer_id')}.", self.peer_id, msg_type="stats-ack")
+                    if msg.get("msg_id") in self.awaiting_acks:
+                        log(f"Removing message ID {msg.get('msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="stats-ack")
                         del self.awaiting_acks[msg.get("msg_id")]
 
                 else:
@@ -297,6 +423,12 @@ class Peer:
         random.shuffle(known_pks)
 
         knowledge_shared = 0
+        known_public_keys = {}
+        for pk, info in self.known_public_keys.items():
+            known_public_keys[pk] = {
+                "peer_id": info.get("peer_id")
+            }
+
         for pk in known_pks[:num_peers_to_share]:
             log(f"Sharing knowledge with peer {pk[:8]}, ID={self.known_public_keys[pk]['peer_id']}...", self.peer_id, msg_type='knowledge')
             knowledge_msg = {
@@ -304,7 +436,7 @@ class Peer:
                 "type": "knowledge",
                 "from": self.public_key,
                 "peer_id": self.peer_id,
-                "known_peers": self.known_public_keys
+                "known_peers": known_public_keys
             }
 
             send_response = self.send(knowledge_msg, pk, timeout=timeout)
@@ -326,9 +458,9 @@ class Peer:
             pk = self.awaiting_acks[msg_id]['receiver']
             if pk in self.known_public_keys:
                 peer_id = self.known_public_keys[self.awaiting_acks[msg_id]['receiver']]['peer_id']
-                log(f"No ACK received from peer {pk[:8]}... with ID {peer_id} for message ID {msg_id} after {timeout} seconds.", self.peer_id, msg_type="warning")
+                log(f"No ACK received from peer {pk[:8]}... with ID {peer_id} for message ID {msg_id[:8]}..., message type {self.awaiting_acks[msg_id].get('type', 'unknown')} after {timeout} seconds.", self.peer_id, msg_type="warning")
             else:
-                log(f"No ACK received from peer {pk[:8]}... with unknown ID, for message ID {msg_id} after {timeout} seconds.", self.peer_id, msg_type="warning")
+                log(f"No ACK received from peer {pk[:8]}... with unknown ID, for message ID {msg_id[:8]}..., message type {self.awaiting_acks[msg_id].get('type', 'unknown')} after {timeout} seconds.", self.peer_id, msg_type="warning")
             del self.awaiting_acks[msg_id]
 
     def share_stats_and_models_info(self, num_peers_to_share=5, timeout=5):
@@ -339,9 +471,10 @@ class Peer:
 
         info_shared = 0
         for pk in known_pks[:num_peers_to_share]:
-            log(f"Sharing IR3DE local stats info and local models info with peer {pk[:8]}, ID={self.known_public_keys[pk]['peer_id']}...", self.peer_id, msg_type='info')
+            msg_id = str(uuid.uuid4())
+            log(f"Sharing IR3DE local stats info and local models info with peer {pk[:8]}, ID={self.known_public_keys[pk]['peer_id']}...", self.peer_id, msg_type='info', msg_id=msg_id)
             info_msg = {
-                "msg_id": str(uuid.uuid4()),
+                "msg_id": msg_id,
                 "type": "info",
                 "from": self.public_key,
                 "peer_id": self.peer_id,
@@ -357,7 +490,8 @@ class Peer:
             for stats in self.stats_info:
                 info_msg["stats_info"].append({
                     "tags": stats.get("tags"),
-                    "tokenizer_name": stats.get("tokenizer"),
+                    "tokenizer_name": stats.get("tokenizer_name"),
+                    "embedder_name": stats.get("embedder_name"),
                     "datasets_names": stats.get("datasets_names")
                 })
             send_response = self.send(info_msg, pk, timeout=timeout)
@@ -371,3 +505,81 @@ class Peer:
             info_shared += 1
 
         log(f"Shared IR3DE local stats info and local models info with {info_shared} peers.", self.peer_id, msg_type='info')
+            
+
+    def ask_stats(self, num_peers_to_ask=5, timeout=5):
+
+        log(f"Asking for IR3DE stats from the network...", self.peer_id, msg_type='stats-req')
+        known_pks = list(self.known_public_keys.keys())
+        known_pks = [pk for pk in known_pks if "stats_info" in self.known_public_keys[pk] and len(self.known_public_keys[pk]["stats_info"]) > 0] # Filter only peers that have shared stats info, since asking for stats to peers that haven't shared stats info would be pointless. In the future, we might want to allow asking for stats even to peers that haven't shared stats info, in case they have the stats but just haven't shared them for some reason.
+        valid_pks = []
+        for pk in known_pks:
+            stats_info = self.known_public_keys[pk]["stats_info"]
+            if any(stats.get("tokenizer_name") == self.default_tokenizer_name and 
+                   stats.get("embedder_name") == self.default_embedder_name for stats in stats_info) and \
+                   "stats" not in self.known_public_keys[pk]: # Also check that we haven't already asked this peer for stats, since asking multiple times for stats to the same peer would be redundant and could be considered spamming. In the future, we might want to allow asking multiple times for stats to the same peer, in case they have updated stats or if we want to ask for stats with different tags or something like that.
+                valid_pks.append(pk)
+        if len(valid_pks) == 0:
+            log(f"No known peers which shared stats info, never shared stats before and with stats info matching our default tokenizer and embedder. Skipping.", self.peer_id, msg_type='stats-req')
+            return
+
+        log(f"Found {len(valid_pks)} peers to ask for IR3DE stats. Asking from {min(len(valid_pks), num_peers_to_ask)} peers.", self.peer_id, msg_type='stats-req')
+        random.shuffle(valid_pks)
+
+        stats_asked = 0
+        for pk in valid_pks[:num_peers_to_ask]:
+            msg_id = str(uuid.uuid4())
+            log(f"Asking for IR3DE stats from peer {pk[:8]}, ID={self.known_public_keys[pk]['peer_id']}...", self.peer_id, msg_type='stats-req', msg_id=msg_id)
+            info_msg = {
+                "msg_id": msg_id,
+                "type": "stats-req",
+                "from": self.public_key,
+                "peer_id": self.peer_id,
+                "tokenizer_name": self.default_tokenizer_name,
+                "embedder_name": self.default_embedder_name
+            }
+            send_response = self.send(info_msg, pk, timeout=timeout)
+            if not send_response:
+                continue
+
+            self.awaiting_acks[info_msg["msg_id"]] = {
+                "receiver": pk,
+                "timestamp": time.time()
+            }
+            stats_asked += 1
+
+        log(f"Asked for IR3DE stats from {stats_asked} peers.", self.peer_id, msg_type='stats-req')
+
+    def share_stats(self, orig_msg_id, tokenizer_name, embedder_name, sender, timeout=5):
+        
+        stats_to_share = []
+        
+        for stats_info, stats in zip(self.stats_info, self.stats):
+            if stats_info['tokenizer_name'] == tokenizer_name and stats_info['embedder_name'] == embedder_name:
+                stats_to_share.append({
+                    "A": [A.cpu() for A in stats["A"]],
+                    "b": [b.cpu() for b in stats["b"]],
+                    "tags": stats["tags"],
+                })
+        msg_id = str(uuid.uuid4())
+        log(f"Sharing stats with {sender[:8]}... in response to stats request ({orig_msg_id[:8]}...). Stats match found: {len(stats_to_share) > 0}.", self.peer_id, msg_type="stats-req", msg_id=msg_id)
+        
+        stats_msg = {
+            "orig_msg_id": orig_msg_id,
+            "msg_id": msg_id,
+            "type": "stats",
+            "from": self.public_key,
+            "peer_id": self.peer_id,
+            "stats": stats_to_share
+        }
+        send_response = self.send(stats_msg, sender, timeout=timeout, large=True)
+        if not send_response:
+            log(f"Failed to send stats response to {sender[:8]}... for the received stats request.", self.peer_id, msg_type="warning", msg_id=msg_id)
+            return
+        
+        log(f"Shared stats with {sender[:8]}... in response to stats request. msg_id = {msg_id}", self.peer_id, msg_type="stats", msg_id=msg_id)
+        self.awaiting_acks[msg_id] = {
+            "receiver": sender,
+            "timestamp": time.time()
+        }
+    

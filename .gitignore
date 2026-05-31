@@ -18,3 +18,4 @@ logs
 logs/**
 /ir3de_stats
 /ir3de_stats/**
+test_**

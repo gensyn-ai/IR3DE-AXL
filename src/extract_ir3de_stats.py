@@ -90,8 +90,8 @@ def main():
     
     torch.save(
         {
-            "A": A.cpu(),
-            "b": b.cpu(),
+            "A": [A.cpu()],
+            "b": [b.cpu()],
             "domain_tags": [TAGS_MAP[args.dataset]],
             "datasets_names": [dataset_name],
             "tokenizer": "meta-llama/Meta-Llama-3-8B",
