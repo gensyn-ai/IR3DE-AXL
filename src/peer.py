@@ -89,6 +89,7 @@ class Peer:
                 model.load_state_dict(state, strict=False)
                 model.to(self.device)
             elif "hf_name" in model_info:
+                log(f"Loading expert model from {model_info['hf_name']}", self.peer_id, msg_type=None)
                 model = LlamaForCausalLM.from_pretrained(model_info["hf_name"])
                 model.to(self.device)  # type: ignore
             else:
