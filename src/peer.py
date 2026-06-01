@@ -4,6 +4,8 @@ import os, pathlib, subprocess, uuid, requests, json, time, random
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, LlamaForCausalLM
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 from ir3de_stats.models.llama_experts import get_llama_expert
 from utils import ipv6_from_pubkey, log, serialize_safe, deserialize_safe, deserialize_chunk_header
@@ -65,6 +67,8 @@ class Peer:
                 self.local_b[identifier][tag] = b
 
         self.chunks = {}
+
+        self.generation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gen")
     
     def get_topology(self, session):
         resp = session.get(f"{AXL}{self.peer_id:02d}/topology", timeout=5)
@@ -734,10 +738,30 @@ class Peer:
             log(f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'.", self.peer_id, msg_type="warning")
             return
 
+        # if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
+        #     log(f"Handling user input locally with the local model since the selected model belongs to this node.", self.peer_id, msg_type="ir3de")
+        #     model_utils = self.models[selected_model[1]]
+        #     answer = self.generate_answer(user_input, model_utils)
+        #     log(f"Answer processed locally.", self.peer_id, msg_type="text")
+        #     log(f"{answer}", self.peer_id, msg_type="text", right=True)
+        #     return
         if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
             log(f"Handling user input locally with the local model since the selected model belongs to this node.", self.peer_id, msg_type="ir3de")
             model_utils = self.models[selected_model[1]]
-            answer = self.generate_answer(user_input, model_utils)
+
+            future = self.generation_executor.submit(self.generate_answer, user_input, model_utils)
+
+            try:
+                answer = future.result(timeout=timeout)
+            except FuturesTimeoutError:
+                log(f"Generation timed out after {timeout}s.",
+                    self.peer_id, msg_type="warning")
+                return
+            except Exception as e:
+                log(f"Generation failed: {e}",
+                    self.peer_id, msg_type="warning")
+                return
+
             log(f"Answer processed locally.", self.peer_id, msg_type="text")
             log(f"{answer}", self.peer_id, msg_type="text", right=True)
             return
@@ -761,6 +785,24 @@ class Peer:
         
     def generate_answer(self, message, model_utils):
         input_ids = model_utils['tokenizer'](message, return_tensors='pt').to(self.device)
-        out = model_utils['model'].generate(input_ids=input_ids['input_ids'], max_length=self.max_answer_len)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        saved_stdout = os.dup(1); saved_stderr = os.dup(2)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        try:
+            out = model_utils['model'].generate(input_ids=input_ids['input_ids'], max_length=self.max_answer_len)
+        finally:
+            os.dup2(saved_stdout, 1)
+            os.dup2(saved_stderr, 2)
+            for fd in (devnull, saved_stdout, saved_stderr):
+                os.close(fd)
         answer = model_utils['tokenizer'].decode(out[0], skip_special_tokens=True)[len(message):]
         return answer
+
+    def __del__(self):
+       if getattr(self, "proc", None) and self.proc.poll() is None:
+           self.proc.terminate()
+           try: 
+               self.proc.wait(timeout=3)
+           except subprocess.TimeoutExpired:
+               self.proc.kill()

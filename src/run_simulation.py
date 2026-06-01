@@ -119,7 +119,7 @@ def main():
         app = SimApp(args, run_peer, handle_input)
         try:
             app.run()
-        except BaseException:
+        except Exception:
             os.makedirs("logs", exist_ok=True)
             if app.peer is not None:
                 path = f"logs/error_{app.peer.peer_id}_{int(time.time())}.log"
