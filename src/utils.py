@@ -1,4 +1,4 @@
-import ipaddress, time, io, struct
+import ipaddress, time, io, struct, os
 import uuid
 
 from rich.text import Text
@@ -309,3 +309,18 @@ def deserialize_chunk_header(packet):
     header = json.loads(packet[header_start:header_end].decode("utf-8"))
 
     return header
+
+
+def redirect_prints(func, *args, **kwargs):
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    saved_stdout = os.dup(1); saved_stderr = os.dup(2)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    try:
+        out = func(*args, **kwargs)
+    finally:
+        os.dup2(saved_stdout, 1)
+        os.dup2(saved_stderr, 2)
+        for fd in (devnull, saved_stdout, saved_stderr):
+            os.close(fd)
+    return out

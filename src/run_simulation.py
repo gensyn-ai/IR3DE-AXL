@@ -13,7 +13,7 @@ def get_args():
     parser.add_argument("--check-acks-interval", type=int, default=100)
     parser.add_argument("--greeting-timeout", type=int, default=60)
     parser.add_argument("--knowledge-timeout", type=int, default=60)
-    parser.add_argument("--ack-timeout", type=int, default=15)
+    parser.add_argument("--ack-timeout", type=int, default=60)
     parser.add_argument("--share-knowledge-interval", type=int, default=30)
     parser.add_argument("--num-peers-to-greet", type=int, default=5)
     parser.add_argument("--num-peers-to-share", type=int, default=5)
