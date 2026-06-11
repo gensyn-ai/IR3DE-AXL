@@ -3,7 +3,7 @@ import os, pathlib, subprocess, uuid, requests, json, time, random
 
 import torch
 import torch.nn.functional as F
-from transformers import AutoTokenizer, LlamaForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
@@ -54,7 +54,7 @@ class Peer:
         self.default_embedder_name = "meta-llama/Meta-Llama-3-8B"
         self.default_lambda = 0.01  # Fixed for now
         self.entropy_top_k = 10  # Fixed for now
-        self.max_answer_len = 128  # Fixed for now
+        self.max_answer_len = 256  # Fixed for now
 
         self.local_A = {}
         self.local_b = {}
@@ -90,7 +90,7 @@ class Peer:
                 model.to(self.device)
             elif "hf_name" in model_info:
                 log(f"Loading expert model from {model_info['hf_name']}", self.peer_id, msg_type=None)
-                model = redirect_prints(LlamaForCausalLM.from_pretrained, model_info["hf_name"])
+                model = redirect_prints(AutoModelForCausalLM.from_pretrained, model_info["hf_name"])
                 model.to(self.device)  # type: ignore
             else:
                 raise ValueError(f"Model info for node {self.peer_id} must contain either 'path' or 'hf_name'. Provided info: {model_info}. Check the metadata{self.peer_id:02d}.json file.")
@@ -115,7 +115,7 @@ class Peer:
         for i, stats in enumerate(self.stats_info):
             stats_data = torch.load(stats["path"], map_location='cpu')
             tokenizer = AutoTokenizer.from_pretrained(stats_data["tokenizer"])
-            model = LlamaForCausalLM.from_pretrained(stats_data["embedder"])
+            model = AutoModelForCausalLM.from_pretrained(stats_data["embedder"])
             embedder = deepcopy(model.model.embed_tokens).to(torch.float32)
             self.stats_info[i]['tokenizer_name'] = stats_data["tokenizer"]
             self.stats_info[i]['embedder_name'] = stats_data["embedder"]
@@ -611,7 +611,7 @@ class Peer:
         }
 
     def get_token_router(self):
-
+        
         identifier = (self.default_tokenizer_name, self.default_embedder_name)
         ref_stats = None
         for stats_info, stats in zip(self.stats_info, self.stats):
@@ -622,49 +622,50 @@ class Peer:
             log(f"No reference stats found for tokenizer {self.default_tokenizer_name} and embedder {self.default_embedder_name}. Cannot handle user input.", self.peer_id, msg_type="warning")
             return
         
-        tokenizer = ref_stats['tokenizer']
-        embedder = ref_stats['embedder'].to(self.device)
-        known_tags = self.known_tags
-        emb_dim = embedder.weight.shape[1]
-        A = torch.zeros((emb_dim + 1, emb_dim + 1), dtype=torch.float32, device=self.device)
-        b_dict = {}
-        for pk in self.known_public_keys:
-            if "stats" in self.known_public_keys[pk]:
-                for stats, stats_info in zip(self.known_public_keys[pk]["stats"], self.known_public_keys[pk]["stats_info"]):
-                    if stats_info['tokenizer_name'] == self.default_tokenizer_name and stats_info['embedder_name'] == self.default_embedder_name:
-                        for tag, A_peer, b_peer in zip(stats['tags'], stats['A'], stats['b']):
-                            if tag in known_tags:
-                                A_peer = A_peer.to(self.device)
-                                b_peer = b_peer.to(self.device)
-                                A += A_peer
-                                if tag not in b_dict:
-                                    b_dict[tag] = b_peer
+        with torch.no_grad():
+            tokenizer = ref_stats['tokenizer']
+            embedder = ref_stats['embedder'].to(self.device)
+            known_tags = self.known_tags
+            emb_dim = embedder.weight.shape[1]
+            A = torch.zeros((emb_dim + 1, emb_dim + 1), dtype=torch.float32, device=self.device)
+            b_dict = {}
+            for pk in self.known_public_keys:
+                if "stats" in self.known_public_keys[pk]:
+                    for stats, stats_info in zip(self.known_public_keys[pk]["stats"], self.known_public_keys[pk]["stats_info"]):
+                        if stats_info['tokenizer_name'] == self.default_tokenizer_name and stats_info['embedder_name'] == self.default_embedder_name:
+                            for tag, A_peer, b_peer in zip(stats['tags'], stats['A'], stats['b']):
+                                if tag in known_tags:
+                                    A_peer = A_peer.to(self.device)
+                                    b_peer = b_peer.to(self.device)
+                                    A += A_peer
+                                    if tag not in b_dict:
+                                        b_dict[tag] = b_peer
+                                    else:
+                                        b_dict[tag] += b_peer
                                 else:
-                                    b_dict[tag] += b_peer
-                            else:
-                                log(f"Received stats with unknown tag '{tag}' from peer {pk[:8]}... New tag found!", self.peer_id, msg_type="warning")
-                                self.known_tags.append(tag)
-        
-        for tag in self.local_A[identifier]:
-            A += self.local_A[identifier][tag].to(self.device)
-            if tag not in b_dict:
-                b_dict[tag] = self.local_b[identifier][tag].to(self.device)
-            else:
-                b_dict[tag] += self.local_b[identifier][tag].to(self.device)
+                                    log(f"Received stats with unknown tag '{tag}' from peer {pk[:8]}... New tag found!", self.peer_id, msg_type="warning")
+                                    self.known_tags.append(tag)
+            
+            for tag in self.local_A[identifier]:
+                A += self.local_A[identifier][tag].to(self.device)
+                if tag not in b_dict:
+                    b_dict[tag] = self.local_b[identifier][tag].to(self.device)
+                else:
+                    b_dict[tag] += self.local_b[identifier][tag].to(self.device)
 
-        b = torch.zeros((emb_dim + 1, len(b_dict)), dtype=torch.float32, device=self.device)
-        for i, tag in enumerate(b_dict):
-            b[:, i] = b_dict[tag]
-        
-        W = torch.linalg.solve(A + self.default_lambda * torch.eye(A.shape[0], device=A.device), b)
-        bias = W[-1, :]
-        W = W[:-1, :]
-        norm = torch.norm(W, dim=0, keepdim=True)
-        if torch.any(norm == 0.0):
-            print("WARNING: 0 encountered in norm, substituting with 1e-6")
-            norm[norm == 0.0] = 1e-6
-        W = W / norm
-        bias = bias / norm[0, :]
+            b = torch.zeros((emb_dim + 1, len(b_dict)), dtype=torch.float32, device=self.device)
+            for i, tag in enumerate(b_dict):
+                b[:, i] = b_dict[tag]
+            
+            W = torch.linalg.solve(A + self.default_lambda * torch.eye(A.shape[0], device=A.device), b)
+            bias = W[-1, :]
+            W = W[:-1, :]
+            norm = torch.norm(W, dim=0, keepdim=True)
+            if torch.any(norm == 0.0):
+                print("WARNING: 0 encountered in norm, substituting with 1e-6")
+                norm[norm == 0.0] = 1e-6
+            W = W / norm
+            bias = bias / norm[0, :]
 
         router = torch.nn.Linear(W.shape[0], W.shape[1]).to(self.device)
         router.weight.data = W.T

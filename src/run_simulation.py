@@ -8,7 +8,7 @@ from ui.ui import SimApp, disable_input, enable_input
  
 def get_args():
     parser = argparse.ArgumentParser(description="Test one peer locally")
-    parser.add_argument("--peer-id", type=int, required=False, default=1)
+    parser.add_argument("--peer-id", type=int, required=False, default=9)
     parser.add_argument("--discover-peers-interval", type=int, default=60)
     parser.add_argument("--check-acks-interval", type=int, default=100)
     parser.add_argument("--greeting-timeout", type=int, default=60)
@@ -31,7 +31,8 @@ def run_peer(app, args):
             disable_input(app)
 
         peer = Peer(args.peer_id)
-        app.peer = peer
+        if app is not None:
+            app.peer = peer
     
         # Log the peer info now that the widget is available
         log(f"Peer {peer.peer_id} - Public Key: {peer.public_key[:8]}..., IPv6: {peer.ipv6_address}", peer.peer_id)
