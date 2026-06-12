@@ -16,11 +16,12 @@ AXL = "http://127.0.0.1:91"
 
 class Peer:
 
-    def __init__(self, peer_id):
+    def __init__(self, peer_id, ir3de_lambda=0.01, ir3de_entropy_top_k=10, max_answer_length=256):
 
         with open(f"local_nodes/metadata{peer_id:02d}.json", "r") as f:
             metadata = json.load(f)
             self.node_name = metadata.get("node_name", f"Node {peer_id}")
+        self.budget = metadata.get("budget", 0.0)
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -52,9 +53,9 @@ class Peer:
         # FUTURE WORK: allow the user for chosing the desired tokenizer and embedder with the UI. Using always the default for now.
         self.default_tokenizer_name = "meta-llama/Meta-Llama-3-8B"
         self.default_embedder_name = "meta-llama/Meta-Llama-3-8B"
-        self.default_lambda = 0.01  # Fixed for now
-        self.entropy_top_k = 10  # Fixed for now
-        self.max_answer_len = 256  # Fixed for now
+        self.default_lambda = ir3de_lambda
+        self.entropy_top_k = ir3de_entropy_top_k
+        self.max_answer_length = max_answer_length
 
         self.local_A = {}
         self.local_b = {}
@@ -105,7 +106,9 @@ class Peer:
                 {
                     "model": model,
                     "tokenizer": tokenizer,
-                    "tags": model_tags
+                    "tags": model_tags,
+                    "costs_per_input_byte": model_info.get("costs_per_input_byte"),
+                    "costs_per_output_token": model_info.get("costs_per_output_token")
                 }
             )
         return models
@@ -261,7 +264,7 @@ class Peer:
                     log(f"From {sender[:8]}...: {message}", self.peer_id, msg_type="text")
 
                     model_utils = self.models[msg['selected_model'][1]]
-                    answer = self.generate_answer(message, model_utils)
+                    answer, price = self.generate_answer(message, model_utils)
                     log(f"To {sender[:8]}...: {answer}", self.peer_id, msg_type="text")
 
                     msg_id = str(uuid.uuid4())
@@ -271,7 +274,8 @@ class Peer:
                         "type": "answer",
                         "from": self.public_key,
                         "peer_id": self.peer_id,
-                        "message": answer
+                        "message": answer,
+                        "price": price
                     }
                     self.send(answer_msg, sender, timeout=timeout)
                 
@@ -279,6 +283,10 @@ class Peer:
 
                     log(f"Received answer from {sender[:8]}...", self.peer_id, msg_type="text")
                     log(f"{msg.get('message')}", msg.get("peer_id"), msg_type="text", right=True)
+                    log(f"Charged price: {msg.get('price')}", msg.get("peer_id"), msg_type="budget")
+                    log(f"Budget before answer: {self.budget}", msg.get("peer_id"), msg_type="budget")
+                    self.budget -= msg.get("price", 0)
+                    log(f"Budget after answer: {self.budget}", msg.get("peer_id"), msg_type="budget")
 
                     if msg.get("orig_msg_id") in self.awaiting_acks:
                         log(f"Removing message ID {msg.get('orig_msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="ir3de-ack")
@@ -512,7 +520,9 @@ class Peer:
                 info_msg["models_info"].append({
                     "tags": model_info.get("tags"),
                     "tokenizer_name": model_info.get("tokenizer"),
-                    "size": model_info.get("size")
+                    "size": model_info.get("size"),
+                    "costs_per_input_byte": model_info.get("costs_per_input_byte"),
+                    "costs_per_output_token": model_info.get("costs_per_output_token")
                 })
             for stats in self.stats_info:
                 info_msg["stats_info"].append({
@@ -695,13 +705,21 @@ class Peer:
         assigned_tag = tags[predicted_tags.view(batch_size, -1).mode(dim=1)[0]]
         return assigned_tag
 
+    @staticmethod
+    def compute_costs(user_input, costs_per_input_byte, costs_per_output_token, max_answer_length):
+        input_costs = len(user_input.encode("utf-8")) * costs_per_input_byte
+        max_output_costs = max_answer_length * costs_per_output_token
+        return input_costs, max_output_costs
 
-    def find_best_model(self, assigned_tag):
+    def find_best_model(self, assigned_tag, user_input):
         valid_peers = []
         for pk in self.known_public_keys:
             if "models_info" in self.known_public_keys[pk]:
                 for i, model_info in enumerate(self.known_public_keys[pk]["models_info"]):
                     if assigned_tag in model_info.get("tags"):
+                        input_costs, max_output_costs = self.compute_costs(user_input, model_info["costs_per_input_byte"], model_info["costs_per_output_token"], self.max_answer_length)
+                        if input_costs + max_output_costs > self.budget:
+                            continue
                         valid_peers.append((pk, i))  # using index to identify which model to use from that peer for now
         for i, model_info in enumerate(self.models_info):
             if assigned_tag in model_info.get("tags"):
@@ -715,8 +733,12 @@ class Peer:
             return selected_model
 
         if len(valid_peers) == 0:
-            log(f"No known peers with models matching the assigned tag '{assigned_tag}' found. Cannot handle user input.", self.peer_id, msg_type="warning")
-            return
+            log(f"No known peers with models matching the assigned tag '{assigned_tag}' and within the available budget ({self.budget}$) found. Handling user input with a random local model.", self.peer_id, msg_type="warning")
+            all_local_models_indices = list(range(len(self.models_info)))
+            random.shuffle(all_local_models_indices)
+            selected_model = (self.public_key, all_local_models_indices[0])
+            log(f"Selected local model {self.models_info[selected_model[1]]['path']} to handle the user input.", self.peer_id, msg_type="ir3de")
+            return selected_model
         
         random.shuffle(valid_peers)
         selected_peer = valid_peers[0]
@@ -735,23 +757,16 @@ class Peer:
         assigned_tag = self.find_best_tag(*out, user_input)
         log(f"User input assigned to tag '{assigned_tag}'", self.peer_id, msg_type="ir3de")
 
-        selected_model = self.find_best_model(assigned_tag)
+        selected_model = self.find_best_model(assigned_tag, user_input)
         if selected_model is None:
             log(f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'.", self.peer_id, msg_type="warning")
             return
 
-        # if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
-        #     log(f"Handling user input locally with the local model since the selected model belongs to this node.", self.peer_id, msg_type="ir3de")
-        #     model_utils = self.models[selected_model[1]]
-        #     answer = self.generate_answer(user_input, model_utils)
-        #     log(f"Answer processed locally.", self.peer_id, msg_type="text")
-        #     log(f"{answer}", self.peer_id, msg_type="text", right=True)
-        #     return
         if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
-            log(f"Handling user input locally with the local model since the selected model belongs to this node.", self.peer_id, msg_type="ir3de")
+            # log(f"Handling user input locally with the local model since the selected model belongs to this node.", self.peer_id, msg_type="ir3de")
             model_utils = self.models[selected_model[1]]
 
-            future = self.generation_executor.submit(self.generate_answer, user_input, model_utils)
+            future = self.generation_executor.submit(self.generate_answer, user_input, model_utils, is_local=True)
 
             try:
                 answer = future.result(timeout=timeout)
@@ -785,10 +800,17 @@ class Peer:
             "timestamp": time.time()
         }
         
-    def generate_answer(self, message, model_utils):
+    def generate_answer(self, message, model_utils, is_local=False):
         input_ids = model_utils['tokenizer'](message, return_tensors='pt').to(self.device)
-        out = redirect_prints(model_utils['model'].generate, input_ids=input_ids['input_ids'], max_length=self.max_answer_len)
+        out = redirect_prints(model_utils['model'].generate, input_ids=input_ids['input_ids'], max_length=self.max_answer_length)
         answer = model_utils['tokenizer'].decode(out[0], skip_special_tokens=True)[len(message):]
+        if not is_local:
+            input_price = len(message.encode("utf-8")) * model_utils['costs_per_input_byte']
+            output_price = len(out[0]) * model_utils['costs_per_output_token']
+            price = input_price + output_price
+            self.budget += price
+            log(f"Generated answer with input price {input_price:.4f}$ and output price {output_price:.4f}$. Total price: {price:.4f}$. Updated budget: {self.budget:.4f}$", self.peer_id, msg_type="budget")
+            return answer, price
         return answer
 
     def __del__(self):

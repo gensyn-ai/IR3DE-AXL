@@ -33,6 +33,7 @@ MSG_TYPE_COLORS = {
     "stats-req":     "#ff8800",
     "stats":         "#ff8800",
     "ir3de":         "#8800ff",
+    "budget":        "#efc81b",
     "greeting-ack":  "#00ff00",
     "knowledge-ack": "#00ff00",
     "info-ack":      "#00ff00",

@@ -8,7 +8,7 @@ from ui.ui import SimApp, disable_input, enable_input
  
 def get_args():
     parser = argparse.ArgumentParser(description="Test one peer locally")
-    parser.add_argument("--peer-id", type=int, required=False, default=9)
+    parser.add_argument("--peer-id", type=int, required=False, default=0)
     parser.add_argument("--discover-peers-interval", type=int, default=60)
     parser.add_argument("--check-acks-interval", type=int, default=100)
     parser.add_argument("--greeting-timeout", type=int, default=60)
@@ -20,6 +20,9 @@ def get_args():
     parser.add_argument("--share-info-interval", type=int, default=60)
     parser.add_argument("--share-stats-interval", type=int, default=60)
     parser.add_argument("--stats-timeout", type=int, default=120)
+    parser.add_argument("--ir3de-lambda", type=float, default=0.01)
+    parser.add_argument("--ir3de-entropy-top-k", type=int, default=10)
+    parser.add_argument("--max-answer-length", type=int, default=256)
     return parser.parse_args()
  
  
@@ -30,7 +33,12 @@ def run_peer(app, args):
         if app is not None:
             disable_input(app)
 
-        peer = Peer(args.peer_id)
+        peer = Peer(
+            peer_id=args.peer_id,
+            ir3de_lambda=args.ir3de_lambda,
+            ir3de_entropy_top_k=args.ir3de_entropy_top_k,
+            max_answer_length=args.max_answer_length
+        )
         if app is not None:
             app.peer = peer
     
