@@ -9,8 +9,19 @@ from rich.text import Text
 from utils import log
 
 
+IR3DE_BANNER = (
+    " ▝▀▌▛▀  ▌▛▀▀▀▀▖ ▀▀▀▀▀▖ ▌▛▀▀▀▀▖ ▛▀▀▀▀▘\n"
+    "   ▌▌   ▌▌    ▌      ▌ ▌▌    ▌ ▌▌    \n"
+    "   ▌▌   ▌▛▀▀▀▚   ▀▀▀▚  ▌▌    ▌ ▛▀▀▀  \n"
+    "   ▌▌   ▌▌    ▌      ▌ ▌▌   ▗▌ ▌▌    \n"
+    " ▝▀▘▀▀  ▘▘    ▘ ▀▀▀▀▀  ▀▀▀▀▀▘  ▀▀▀▀▀▘"
+)
+
 def disable_input(app):
-    app.call_from_thread(lambda: setattr(app.query_one("#user-input", Input), "disabled", True))
+    def _disable():
+        app.query_one("#user-input", Input).disabled = True
+        app.query_one("#prompt", Static).styles.color = "#444444"
+    app.call_from_thread(_disable)
 
 
 def enable_input(app, node_id):
@@ -20,6 +31,7 @@ def enable_input(app, node_id):
         def _enable():
             input_widget.disabled = False
             input_widget.focus()
+            app.query_one("#prompt", Static).styles.color = "#888888"
         app.call_from_thread(_enable)
 
 
@@ -40,23 +52,25 @@ class SimApp(App):
         self.input_handler = input_handler
 
     def compose(self) -> ComposeResult:
+        yield Static("", id="top-divider")
+        yield Static(IR3DE_BANNER, id="ir3de-banner")
         yield Static("", id="top-bar")
         with Horizontal():
             yield Static("", id="border-left")
             with Vertical(id="left-pane"):
-                yield RichLog(id="logs", highlight=False, markup=False, auto_scroll=True, wrap=True)
+                yield FollowTailLog(id="logs", highlight=False, markup=False, auto_scroll=False, wrap=True)
             yield Static("", id="divider")
             with Vertical(id="right-pane"):
                 yield RichLog(id="output", highlight=False, markup=False, auto_scroll=True, wrap=True)
-                yield Input(id="user-input")
+                yield Static("", id="input-divider")
+                with Horizontal(id="input-row"):
+                    yield Static("> ", id="prompt")
+                    yield Input(id="user-input")
             yield Static("", id="border-right")
         yield Static("", id="bottom-bar")
 
     def on_mount(self):
-        width = self.app.size.width
-        bar = "═" * width
-        self.query_one("#top-bar", Static).update(bar)
-        self.query_one("#bottom-bar", Static).update(bar)
+        self._fill_bars()
 
         log_widget = self.query_one("#logs", RichLog)
         output_widget = self.query_one("#output", RichLog)
@@ -67,12 +81,18 @@ class SimApp(App):
 
         self.query_one("#user-input", Input).focus()  # <-- give input focus
 
+        self.call_after_refresh(self._fill_input_divider)
+
         threading.Thread(
             target=self.logs_function,
             args=(self, self.args),
             daemon=True,
             name="logs-thread"
         ).start()
+    
+    def _fill_input_divider(self):
+        div = self.query_one("#input-divider", Static)
+        div.update("═" * div.size.width)
 
     def on_input_submitted(self, event: Input.Submitted):
         user_text = event.value
@@ -85,3 +105,35 @@ class SimApp(App):
             self.peer.proc.terminate()
             self.peer.proc.wait()
         self.exit()
+
+    def on_resize(self, event):
+        self._fill_bars()
+        self._fill_input_divider()
+    
+    def _fill_bars(self):
+        bar = "═" * self.app.size.width
+        for wid in ("#top-divider", "#top-bar", "#bottom-bar"):
+            self.query_one(wid, Static).update(bar)
+
+
+class FollowTailLog(RichLog):
+    """RichLog that only auto-scrolls when the user is already at the bottom."""
+
+    def write(
+        self,
+        content,
+        width=None,
+        expand=False,
+        shrink=True,
+        scroll_end=None,
+        animate=False,
+    ):
+        at_bottom = self.scroll_y >= self.max_scroll_y - 1
+        return super().write(
+            content,
+            width=width,
+            expand=expand,
+            shrink=shrink,
+            scroll_end=at_bottom,    # still always recomputed
+            animate=animate,
+        )

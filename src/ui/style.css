@@ -33,14 +33,46 @@ Horizontal {
     color: #888888;
 }
 
+#logs, #output {
+    scrollbar-size-vertical: 1;
+    scrollbar-size-horizontal: 0;
+    scrollbar-background: #0e5200;
+    scrollbar-color: #1c9800;
+    scrollbar-color-active: #126900;
+    scrollbar-color-hover: #11ff00;
+}
+
 #output {
     height: 1fr;
-    scrollbar-size: 0 0;
+}
+
+#input-row {
+    height: 1;
+    width: 100%;
+}
+
+#prompt {
+    width: 2;
+    height: 1;
+    color: #888888;
 }
 
 #user-input {
+    width: 1fr;
     height: 1;
-    dock: bottom;
     border: none;
     padding: 0;
+}
+
+#input-divider {
+    height: 1;
+    width: 100%;
+    color: #888888;
+}
+
+#ir3de-banner {
+    height: 5;
+    width: 100%;
+    content-align: center top;
+    color: #888888;
 }
