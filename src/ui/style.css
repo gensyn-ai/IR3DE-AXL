@@ -11,7 +11,7 @@ Horizontal {
 #border-left, #border-right, #divider {
     width: 1;
     height: 100%;
-    background: #888888;
+    background: #ffffff;
 }
 
 #left-pane, #right-pane {
@@ -30,13 +30,15 @@ Horizontal {
 #top-bar, #bottom-bar {
     height: 1;
     width: 100%;
-    color: #888888;
+    color: #ffffff;
 }
 
 #logs, #output {
-    scrollbar-size-vertical: 1;
+    scrollbar-size-vertical: 2;
     scrollbar-size-horizontal: 0;
     scrollbar-background: #0e5200;
+    scrollbar-background-hover: #0e5200;
+    scrollbar-background-active: #0e5200;
     scrollbar-color: #1c9800;
     scrollbar-color-active: #126900;
     scrollbar-color-hover: #11ff00;
@@ -48,6 +50,7 @@ Horizontal {
 
 #input-row {
     height: 1;
+    height: auto;
     width: 100%;
 }
 
@@ -59,7 +62,8 @@ Horizontal {
 
 #user-input {
     width: 1fr;
-    height: 1;
+    height: auto;
+    max-height: 8;        /* cap so it can't eat the whole pane */
     border: none;
     padding: 0;
 }
@@ -67,12 +71,56 @@ Horizontal {
 #input-divider {
     height: 1;
     width: 100%;
-    color: #888888;
+    color: #ffffff;
 }
 
 #ir3de-banner {
     height: 5;
     width: 100%;
     content-align: center top;
+    color: #ffffff;
+}
+
+#logs-header {
+    height: 1;
+    width: 100%;
+}
+
+#logs-label {
+    width: 1fr;
+    color: #237dfa;
+    text-style: bold;
+    content-align: left middle;
+}
+
+#filter-toggle {
+    width: auto;
     color: #888888;
+    content-align: right middle;
+}
+
+FilterChip:hover, ActionChip:hover {
+    background: #333333;
+    text-style: bold;
+}
+
+#filter-toggle:hover {
+    color: #ffffff;
+    text-style: bold;
+}
+
+#filter-drawer {
+    height: auto;            /* grows as rows are added */
+    width: 100%;
+    display: none;           /* still hidden until toggle */
+}
+
+.filter-row {
+    height: 1;
+    width: 100%;
+}
+
+FilterChip, ActionChip {
+    width: auto;
+    margin-right: 1;
 }

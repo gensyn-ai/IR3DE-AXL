@@ -1,11 +1,11 @@
-import ipaddress, time, io, struct, os
-import uuid
+import ipaddress, time, io, struct, os, uuid, threading, json
 
-from rich.text import Text
 import torch
 import numpy as np
-import json
+
+from rich.text import Text
 from termcolor import colored
+from collections import deque
 
 
 ACTIVATE_UI = True
@@ -13,10 +13,18 @@ ACTIVATE_UI = True
 # Global reference to the RichLog widget — set by the app on mount
 _log_widget = None
 _output_widget = None
+
+_LOG_BUFFER_MAX = 10_000
+_log_buffer: deque = deque(maxlen=_LOG_BUFFER_MAX)
+_log_lock = threading.Lock()
+
+_filter_predicate = lambda msg_type: True
+
  
 def set_log_widget(widget):
     global _log_widget
     _log_widget = widget
+
 
 def set_output_widget(widget):
     global _output_widget
@@ -24,7 +32,7 @@ def set_output_widget(widget):
 
  
 MSG_TYPE_COLORS = {
-    "text":          "#E2AAF8",
+    "text":          "#e2aaf8",
     "warning":       "#ff0000",
     "newnode":       "#ff00ff",
     "greeting":      "#00ffff",
@@ -41,6 +49,17 @@ MSG_TYPE_COLORS = {
     "ir3de-ack":     "#00ff00",
 }
  
+
+def set_filter_predicate(fn):
+    global _filter_predicate
+    _filter_predicate = fn
+
+
+def iter_log_buffer():
+    """Thread-safe snapshot iteration for re-rendering."""
+    with _log_lock:
+        return list(_log_buffer)
+    
  
 def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
 
@@ -60,8 +79,11 @@ def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
 
 
 def log(message, node_id, msg_type=None, msg_id=None, right=False):
+
     current_time = time.strftime('%H:%M:%S') + f".{int(time.time() * 1000) % 1000:03d}"
+
     if ACTIVATE_UI:
+
         msg_id_str = f" [{msg_id[:8]}]" if msg_id is not None else ""
         prefix = f"[NODE {node_id}] [{current_time}] "
 
@@ -76,6 +98,13 @@ def log(message, node_id, msg_type=None, msg_id=None, right=False):
         else:
             line.append(msg_id_str, style="#ffffff")
             line.append(message, style="#ffffff")
+
+        entry = (time.time(), node_id, msg_type, line)
+        with _log_lock:
+            _log_buffer.append(entry)
+
+        if not _filter_predicate(msg_type):
+            return                     # ← skip writing to widget, but keep buffer entry
 
         target = _output_widget if right else _log_widget
 

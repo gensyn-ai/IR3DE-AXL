@@ -3,7 +3,10 @@ import os, traceback, argparse, threading, time
 from peer import Peer
 from utils import log, ACTIVATE_UI
  
-from ui.ui import SimApp, disable_input, enable_input
+from ui.ui import SimApp, disable_input, enable_input, disable_filters, enable_filters
+
+
+os.environ.setdefault("COLORTERM", "truecolor")
 
  
 def get_args():
@@ -32,6 +35,7 @@ def run_peer(app, args):
     try:
         if app is not None:
             disable_input(app)
+            disable_filters(app)
 
         peer = Peer(
             peer_id=args.peer_id,
@@ -41,6 +45,7 @@ def run_peer(app, args):
         )
         if app is not None:
             app.peer = peer
+            enable_filters(app)
     
         # Log the peer info now that the widget is available
         log(f"Peer {peer.peer_id} - Public Key: {peer.public_key[:8]}..., IPv6: {peer.ipv6_address}", peer.peer_id)
