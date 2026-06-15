@@ -354,3 +354,10 @@ def redirect_prints(func, *args, **kwargs):
         for fd in (devnull, saved_stdout, saved_stderr):
             os.close(fd)
     return out
+
+
+def format_params(n: int) -> str:
+    if n >= 1e9:  return f"{n / 1e9:.2f}B"
+    if n >= 1e6:  return f"{n / 1e6:.2f}M"
+    if n >= 1e3:  return f"{n / 1e3:.2f}K"
+    return str(n)

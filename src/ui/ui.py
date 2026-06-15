@@ -1,13 +1,19 @@
 import threading
 
-from utils import set_log_widget, set_output_widget
+from matplotlib import table
+
+from utils import format_params, set_log_widget, set_output_widget
 
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Static, TextArea
+from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from rich.text import Text
-from utils import log, MSG_TYPE_COLORS, set_filter_predicate
+from utils import log, MSG_TYPE_COLORS, set_filter_predicate, ipv6_from_pubkey
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from peer import Peer
 
 
 IR3DE_BANNER = (
@@ -139,7 +145,7 @@ class SimApp(App):
     def __init__(self, args, logs_function, input_handler):
         super().__init__()
         self.args = args
-        self.peer = None
+        self.peer: "Peer | None" = None
         self.logs_function = logs_function
         self.input_handler = input_handler
         self._active_filters: set[str] = set(MSG_TYPE_COLORS.keys()) | {"no-tag"}
@@ -165,18 +171,35 @@ class SimApp(App):
             yield Static("", id="divider")
 
             with Vertical(id="right-pane"):
-                yield Static("═══ Input ═══", id="logs-label")
-                yield RichLog(id="output", highlight=False, markup=False, auto_scroll=True, wrap=True)
-                yield Static("", id="input-divider")
-                with Horizontal(id="input-row"):
-                    yield Static("> ", id="prompt")
-                    yield SubmittableTextArea(id="user-input")
-                    yield Static("[SEND]", id="send-button", markup=False)
+                with TabbedContent(id="right-tabs"):
+                    
+                    with TabPane("Input", id="tab-input"):
+                        yield RichLog(id="output", highlight=False, markup=False,
+                                    auto_scroll=True, wrap=True)
+                        yield Static("", id="input-divider")
+                        with Horizontal(id="input-row"):
+                            yield Static("> ", id="prompt")
+                            yield SubmittableTextArea(id="user-input")
+                            yield Static("[SEND]", id="send-button", markup=False)
+                    
+                    with TabPane("Statistics", id="tab-stats"):
+                        yield Static("", id="budget-display")
+                        with Horizontal(id="stats-tables-row"):
+                            with Vertical(classes="stats-table-container"):
+                                yield Static("Local Models", classes="stats-table-title")
+                                yield DataTable(id="models-table")
+                            with Vertical(classes="stats-table-container"):
+                                yield Static("Local IR3DE Stats", classes="stats-table-title")
+                                yield DataTable(id="ir3de-stats-table")
+                        yield Static("Known Peers", classes="stats-table-title")
+                        yield DataTable(id="peers-table")
+
             yield Static("", id="border-right")
 
         yield Static("", id="bottom-bar")
 
     def on_mount(self):
+
         self._fill_bars()
 
         log_widget = self.query_one("#logs", RichLog)
@@ -196,6 +219,96 @@ class SimApp(App):
         ).start()
     
         set_filter_predicate(self._should_show_log)
+
+        # Statistics tab — peers table
+        table = self.query_one("#peers-table", DataTable)
+
+        self._col_name, self._col_pubkey, self._col_ipv6 = table.add_columns(
+            "Name", "Public Key", "IPv6 address"
+        )
+        self._sort_column_key = self._col_name      # default: sort by Name
+        self._sort_reverse = False                  # default: ascending
+
+        table.cursor_type = "row"
+        table.zebra_stripes = True
+
+        # Refresh table every 2 seconds while the app is running.
+        self.set_interval(2.0, self._refresh_stats_tab)
+
+        # Models table setup
+        models_table = self.query_one("#models-table", DataTable)
+        models_table.add_columns("Model Type", "Parameters", "Expertise")
+        models_table.zebra_stripes = True
+
+        # IR3DE stats table setup
+        stats_table = self.query_one("#ir3de-stats-table", DataTable)
+        stats_table.add_columns("Tokenizer", "Embedder", "Dataset", "Expertise")
+        stats_table.zebra_stripes = True
+
+    def _refresh_peers_table(self):
+
+        if self.peer is None:
+            return
+
+        table = self.query_one("#peers-table", DataTable)
+        table.clear()
+
+        # Show this node first, so it's always visible
+        # Collect all rows
+        self_row = (
+            f"{self.peer.node_name} (self)",
+            self.peer.public_key[:16] + "...",
+            self.peer.ipv6_address,
+        )
+        rows = []
+        
+        for pk, info in self.peer.known_public_keys.items():
+            name = info.get("peer_name") or f"Node {info.get('peer_id', '?')}"
+            try:
+                ipv6 = ipv6_from_pubkey(pk)
+            except ValueError:
+                ipv6 = "<invalid>"
+            rows.append((name, pk[:16] + "...", ipv6))
+
+        # Sort according to current sort state
+        col_idx = {
+            self._col_name:   0,
+            self._col_pubkey: 1,
+            self._col_ipv6:   2,
+        }[self._sort_column_key]
+        rows.sort(key=lambda r: r[col_idx].lower(), reverse=self._sort_reverse)
+
+        table.clear()
+        table.add_row(*self_row)
+        for row in rows:
+            table.add_row(*row)
+
+        self._update_header_labels()
+
+    def _update_header_labels(self):
+        table = self.query_one("#peers-table", DataTable)
+        arrow = "▲" if self._sort_reverse else "▼"
+        labels = {
+            self._col_name:   "Name",
+            self._col_pubkey: "Public Key",
+            self._col_ipv6:   "IPv6 address",
+        }
+        for col_key, base in labels.items():
+            text = f"{base} {arrow}" if col_key == self._sort_column_key else base
+            table.columns[col_key].label = Text(text)
+        table.refresh()
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
+        if event.control is None or event.control.id != "peers-table":
+            return                              # sorting is only wired for #peers-table
+        if event.column_key == self._sort_column_key:
+            # Same column → flip direction
+            self._sort_reverse = not self._sort_reverse
+        else:
+            # Different column → sort ascending
+            self._sort_column_key = event.column_key
+            self._sort_reverse = False
+        self._refresh_peers_table()
 
     def _should_show_log(self, msg_type) -> bool:
         key = "no-tag" if msg_type is None else msg_type
@@ -332,6 +445,41 @@ class SimApp(App):
             if chip.active != should_be_active:
                 chip.active = should_be_active
                 chip._refresh_label()
+    
+    def _refresh_stats_tab(self):
+        if self.peer is None:
+            return
+        self._refresh_budget()
+        self._refresh_models_table()
+        self._refresh_ir3de_stats_table()
+        self._refresh_peers_table()
+
+    def _refresh_budget(self):
+        assert self.peer is not None
+        widget = self.query_one("#budget-display", Static)
+        widget.update(f"Budget: ${self.peer.budget:.4f}")
+
+    def _refresh_models_table(self):
+        assert self.peer is not None
+        table = self.query_one("#models-table", DataTable)
+        table.clear()
+        for model_utils in self.peer.models:
+            model = model_utils["model"]
+            model_type = getattr(model.config, "model_type", "unknown")
+            num_params = sum(p.numel() for p in model.parameters())
+            tags = ", ".join(model_utils.get("tags", []) or [])
+            table.add_row(model_type, format_params(num_params), tags)
+
+    def _refresh_ir3de_stats_table(self):
+        assert self.peer is not None
+        table = self.query_one("#ir3de-stats-table", DataTable)
+        table.clear()
+        for stats_info, stats in zip(self.peer.stats_info, self.peer.stats):
+            tokenizer = stats_info.get("tokenizer_name", "?")
+            embedder  = stats_info.get("embedder_name", "?")
+            datasets  = ", ".join(stats.get("datasets", []) or [])
+            tags      = ", ".join(stats.get("tags", []) or [])
+            table.add_row(tokenizer, embedder, datasets, tags)
 
 
 class FollowTailLog(RichLog):

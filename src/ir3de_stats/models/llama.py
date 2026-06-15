@@ -23,6 +23,7 @@ class LlamaWrapper(torch.nn.Module):
         config.dtype = torch.bfloat16
         config._attn_implementation = attn_implementation
         self._model = LlamaForCausalLM(config).to(dtype=torch.bfloat16)  # type: ignore
+        self.config = config
 
     def forward(self, input_ids: torch.Tensor, expert_id=None, layer_id=None):
         outputs = self._model(input_ids=input_ids, expert_id=expert_id, layer_id=layer_id)
@@ -81,6 +82,7 @@ class LlamaWrapperWithMLPSize(torch.nn.Module):
             config._attn_implementation = attn_implementation
         
         self._model = LlamaForCausalLM(config).to(dtype=torch.bfloat16)  # type: ignore
+        self.config = config
 
     def forward(self, input_ids: torch.Tensor, expert_id=None, layer_id=None):
         outputs = self._model(input_ids=input_ids, expert_id=expert_id, layer_id=layer_id)

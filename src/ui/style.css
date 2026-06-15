@@ -143,3 +143,78 @@ FilterChip, ActionChip {
     background: #3a3a3a;
     color: #888888;
 }
+
+TabbedContent {
+    height: 1fr;
+}
+
+Tabs {
+    background: transparent;
+}
+
+Tab {
+    color: #888888;
+    padding: 0 2;
+}
+
+Tab.-active {
+    color: #237dfa;
+    text-style: bold;
+    background: transparent;
+}
+
+Underline {
+    color: #237dfa;
+}
+
+#stats-placeholder {
+    width: 100%;
+    height: 100%;
+    color: #888888;
+    content-align: center middle;
+}
+
+Tab:focus {
+    background: transparent;
+}
+
+#peers-table {
+    height: 12;          /* 1 header + ~10 data rows + a bit of slack */
+    width: 1fr;
+    margin: 0 2;
+    border: solid #888888;
+}
+
+#budget-display {
+    width: 100%;
+    height: 1;
+    color: #efc81b;
+    text-style: bold;
+    padding: 0 2;
+    margin-top: 1;
+}
+
+#stats-tables-row {
+    height: auto;
+    width: 100%;
+    margin: 1 2;
+}
+
+.stats-table-container {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+
+.stats-table-title {
+    width: 100%;
+    color: #237dfa;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#models-table, #ir3de-stats-table {
+    height: 8;
+    width: 100%;
+    border: solid #888888;
+}

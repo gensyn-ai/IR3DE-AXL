@@ -181,6 +181,7 @@ class Peer:
         log(f"New node discovered with ID = {msg.get('peer_id')}!", self.peer_id, msg_type="newnode")
         self.known_public_keys[sender] = {}
         self.known_public_keys[sender]["peer_id"] = msg.get("peer_id")
+        self.known_public_keys[sender]["peer_name"] = msg.get("peer_name")
 
     def recv_loop(self, timeout=120):
         
@@ -213,7 +214,8 @@ class Peer:
                             "msg_id": msg.get("chunk_msg_id"),
                             "type": "stats-ack",
                             "from": self.public_key,
-                            "peer_id": self.peer_id
+                            "peer_id": self.peer_id,
+                            "peer_name": self.node_name
                         }
 
                         self.send(stats_ack, msg['pk_from'], timeout=timeout)
@@ -274,6 +276,7 @@ class Peer:
                         "type": "answer",
                         "from": self.public_key,
                         "peer_id": self.peer_id,
+                        "peer_name": self.node_name,
                         "message": answer,
                         "price": price
                     }
@@ -300,6 +303,7 @@ class Peer:
                         log(f"New node discovered with ID = {msg.get('peer_id')}!", self.peer_id, msg_type="newnode")
                         self.known_public_keys[sender] = {}
                         self.known_public_keys[sender]["peer_id"] = msg.get("peer_id")
+                        self.known_public_keys[sender]["peer_name"] = msg.get("peer_name")
 
                     if msg.get("type") == "greeting":
                         log(f"Sending greeting back to Node {msg.get('peer_id')}...", self.peer_id, msg_type="greeting-ack")
@@ -308,6 +312,7 @@ class Peer:
                             "type": "greeting-ack",
                             "from": self.public_key,
                             "peer_id": self.peer_id,
+                            "peer_name": self.node_name,
                             "message": f"Hello from node {self.peer_id}!"
                         }
                         self.send(greetings, sender, timeout=timeout)
@@ -335,7 +340,8 @@ class Peer:
                         "msg_id": msg.get("msg_id"),
                         "type": "knowledge-ack",
                         "from": self.public_key,
-                        "peer_id": self.peer_id
+                        "peer_id": self.peer_id,
+                        "peer_name": self.node_name
                     }
                     self.send(knowledge_ack, sender, timeout=timeout)
                 
@@ -364,7 +370,8 @@ class Peer:
                         "msg_id": msg.get("msg_id"),
                         "type": "info-ack",
                         "from": self.public_key,
-                        "peer_id": self.peer_id
+                        "peer_id": self.peer_id,
+                        "peer_name": self.node_name
                     }
                     self.send(info_ack, sender, timeout=timeout)
                 
@@ -437,6 +444,7 @@ class Peer:
                 "type": "greeting",
                 "from": self.public_key,
                 "peer_id": self.peer_id,
+                "peer_name": self.node_name,
                 "message": f"Hello from node {self.peer_id}!",
             }
             send_response =self.send(greetings, pk, timeout=timeout)
@@ -461,7 +469,8 @@ class Peer:
         known_public_keys = {}
         for pk, info in self.known_public_keys.items():
             known_public_keys[pk] = {
-                "peer_id": info.get("peer_id")
+                "peer_id": info.get("peer_id"),
+                "peer_name": info.get("peer_name")
             }
 
         for pk in known_pks[:num_peers_to_share]:
@@ -471,6 +480,7 @@ class Peer:
                 "type": "knowledge",
                 "from": self.public_key,
                 "peer_id": self.peer_id,
+                "peer_name": self.node_name,
                 "known_peers": known_public_keys
             }
 
@@ -513,6 +523,7 @@ class Peer:
                 "type": "info",
                 "from": self.public_key,
                 "peer_id": self.peer_id,
+                "peer_name": self.node_name,
                 "models_info": [],
                 "stats_info": []
             }
@@ -572,6 +583,7 @@ class Peer:
                 "type": "stats-req",
                 "from": self.public_key,
                 "peer_id": self.peer_id,
+                "peer_name": self.node_name,
                 "tokenizer_name": self.default_tokenizer_name,
                 "embedder_name": self.default_embedder_name
             }
@@ -607,6 +619,7 @@ class Peer:
             "type": "stats",
             "from": self.public_key,
             "peer_id": self.peer_id,
+            "peer_name": self.node_name,
             "stats": stats_to_share
         }
         send_response = self.send(stats_msg, sender, timeout=timeout, large=True)
@@ -789,6 +802,7 @@ class Peer:
             "type": "text",
             "from": self.public_key,
             "peer_id": self.peer_id,
+            "peer_name": self.node_name,
             "assigned_tag": assigned_tag,
             "selected_model": selected_model,
             "message": user_input
