@@ -124,3 +124,22 @@ FilterChip, ActionChip {
     width: auto;
     margin-right: 1;
 }
+
+#send-button {
+    width: 10;
+    height: 100%;
+    padding: 0 1;
+    color: #ffffff;
+    background: #237dfa;
+    content-align: center middle;
+}
+
+#send-button:hover {
+    background: #23c1fa;
+    color: #000000;
+}
+
+#send-button:disabled {
+    background: #3a3a3a;
+    color: #888888;
+}

@@ -22,6 +22,7 @@ def disable_input(app):
     def _disable():
         app.query_one("#user-input", TextArea).disabled = True
         app.query_one("#prompt", Static).styles.color = "#444444"
+        app.query_one("#send-button", Static).disabled = True
     app.call_from_thread(_disable)
 
 
@@ -33,6 +34,7 @@ def enable_input(app, node_id):
             input_widget.disabled = False
             input_widget.focus()
             app.query_one("#prompt", Static).styles.color = "#888888"
+            app.query_one("#send-button", Static).disabled = False
         app.call_from_thread(_enable)
 
 
@@ -63,20 +65,26 @@ def read_css():
 
 
 class SubmittableTextArea(TextArea):
-    """TextArea that submits on Enter, inserts newline on Shift+Enter."""
 
     class Submitted(Message):
         def __init__(self, value: str):
             super().__init__()
             self.value = value
 
+    def submit(self):
+        value = self.text
+        self.text = ""
+        self.post_message(self.Submitted(value))
+
     def on_key(self, event):
-        if event.key == "enter" and not getattr(event, "shift", False):
+        if event.key == "enter":
             event.prevent_default()
             event.stop()
-            value = self.text
-            self.text = ""
-            self.post_message(self.Submitted(value))
+            self.submit()
+        elif event.key in ("shift+enter", "ctrl+j"):
+            event.prevent_default()
+            event.stop()
+            self.insert("\n")
 
 
 class ActionChip(Static):
@@ -163,6 +171,7 @@ class SimApp(App):
                 with Horizontal(id="input-row"):
                     yield Static("> ", id="prompt")
                     yield SubmittableTextArea(id="user-input")
+                    yield Static("[SEND]", id="send-button", markup=False)
             yield Static("", id="border-right")
 
         yield Static("", id="bottom-bar")
@@ -241,6 +250,10 @@ class SimApp(App):
             if not self._filters_enabled:
                 return                       # silently ignore clicks while disabled
             self._toggle_drawer()
+        elif event.control.id == "send-button":
+            if event.control.disabled:
+                return
+            self.query_one("#user-input", SubmittableTextArea).submit()
 
     def _toggle_drawer(self):
         drawer = self.query_one("#filter-drawer")
