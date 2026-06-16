@@ -1,7 +1,5 @@
 import threading
 
-from matplotlib import table
-
 from utils import format_params, set_log_widget, set_output_widget
 
 from textual.app import App, ComposeResult
@@ -150,6 +148,7 @@ class SimApp(App):
         self.input_handler = input_handler
         self._active_filters: set[str] = set(MSG_TYPE_COLORS.keys()) | {"no-tag"}
         self._filters_enabled = False
+        self._selected_peer_pubkey: str | None = None   # None until first refresh; defaults to self
 
     def compose(self) -> ComposeResult:
 
@@ -184,15 +183,16 @@ class SimApp(App):
                     
                     with TabPane("Statistics", id="tab-stats"):
                         yield Static("", id="budget-display")
+                        yield Static("Known Peers", id="peers-title", classes="stats-table-title")
+                        yield DataTable(id="peers-table")
                         with Horizontal(id="stats-tables-row"):
                             with Vertical(classes="stats-table-container"):
-                                yield Static("Local Models", classes="stats-table-title")
+                                yield Static("Local Models", id="models-title", classes="stats-table-title")
                                 yield DataTable(id="models-table")
                             with Vertical(classes="stats-table-container"):
-                                yield Static("Local IR3DE Stats", classes="stats-table-title")
+                                yield Static("Local IR3DE Stats", id="stats-title", classes="stats-table-title")
                                 yield DataTable(id="ir3de-stats-table")
-                        yield Static("Known Peers", classes="stats-table-title")
-                        yield DataTable(id="peers-table")
+                        
 
             yield Static("", id="border-right")
 
@@ -237,53 +237,88 @@ class SimApp(App):
 
         # Models table setup
         models_table = self.query_one("#models-table", DataTable)
-        models_table.add_columns("Model Type", "Parameters", "Expertise")
+        (self._col_models_type, self._col_models_params, self._col_models_tags,
+         self._col_models_in_cost, self._col_models_out_cost) = models_table.add_columns(
+            "Model Type  ",
+            "Parameters  ",
+            "Expertise  ",
+            Text("$ / input byte  "),
+            Text("$ / output token  "),
+        )
         models_table.zebra_stripes = True
+        self._models_sort_column_key = self._col_models_type
+        self._models_sort_reverse = False
 
         # IR3DE stats table setup
         stats_table = self.query_one("#ir3de-stats-table", DataTable)
-        stats_table.add_columns("Tokenizer", "Embedder", "Dataset", "Expertise")
+        (self._col_stats_tok, self._col_stats_emb,
+         self._col_stats_ds, self._col_stats_tags) = stats_table.add_columns(
+            "Tokenizer  ", "Embedder  ", "Dataset  ", "Expertise  "
+        )
         stats_table.zebra_stripes = True
+        self._stats_sort_column_key = self._col_stats_tok
+        self._stats_sort_reverse = False
+
+    def _update_sort_arrows(self, table, columns, active_key, reverse):
+        arrow = "▲" if reverse else "▼"
+        for col_key, base in columns:
+            suffix = f" {arrow}" if col_key == active_key else "  "
+            text = f"{base}{suffix}"
+            table.columns[col_key].label = Text(text)
+        table.refresh()
 
     def _refresh_peers_table(self):
-
         if self.peer is None:
             return
 
         table = self.query_one("#peers-table", DataTable)
-        table.clear()
+        saved_x, saved_y = table.scroll_x, table.scroll_y
 
-        # Show this node first, so it's always visible
-        # Collect all rows
-        self_row = (
+        # Default selection to self on first run
+        if self._selected_peer_pubkey is None:
+            self._selected_peer_pubkey = self.peer.public_key
+
+        # Collect (pubkey, display tuple) pairs so we can use pk as the row key
+        rows: list[tuple[str, tuple[str, str, str]]] = []
+        self_row = (self.peer.public_key, (
             f"{self.peer.node_name} (self)",
             self.peer.public_key[:16] + "...",
             self.peer.ipv6_address,
-        )
-        rows = []
-        
+        ))
         for pk, info in self.peer.known_public_keys.items():
             name = info.get("peer_name") or f"Node {info.get('peer_id', '?')}"
             try:
                 ipv6 = ipv6_from_pubkey(pk)
             except ValueError:
                 ipv6 = "<invalid>"
-            rows.append((name, pk[:16] + "...", ipv6))
+            rows.append((pk, (name, pk[:16] + "...", ipv6)))
 
-        # Sort according to current sort state
         col_idx = {
             self._col_name:   0,
             self._col_pubkey: 1,
             self._col_ipv6:   2,
         }[self._sort_column_key]
-        rows.sort(key=lambda r: r[col_idx].lower(), reverse=self._sort_reverse)
+        rows.sort(key=lambda r: r[1][col_idx].lower(), reverse=self._sort_reverse)
+
+        # Pin self on top, sorted peers below
+        all_rows = [self_row] + rows
 
         table.clear()
-        table.add_row(*self_row)
-        for row in rows:
-            table.add_row(*row)
+        selected_row_index = 0
+        for i, (pk, display) in enumerate(all_rows):
+            table.add_row(*display, key=pk)
+            if pk == self._selected_peer_pubkey:
+                selected_row_index = i
 
         self._update_header_labels()
+
+        # Move cursor to the currently-selected pk
+        if 0 <= selected_row_index < table.row_count:
+            table.move_cursor(row=selected_row_index)
+
+        self.call_after_refresh(
+            lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False)
+        )
 
     def _update_header_labels(self):
         table = self.query_one("#peers-table", DataTable)
@@ -299,16 +334,19 @@ class SimApp(App):
         table.refresh()
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
-        if event.control is None or event.control.id != "peers-table":
-            return                              # sorting is only wired for #peers-table
-        if event.column_key == self._sort_column_key:
-            # Same column → flip direction
-            self._sort_reverse = not self._sort_reverse
-        else:
-            # Different column → sort ascending
+        table_id = event.control.id if event.control else None
+        if table_id == "peers-table":
+            self._sort_reverse = not self._sort_reverse if event.column_key == self._sort_column_key else False
             self._sort_column_key = event.column_key
-            self._sort_reverse = False
-        self._refresh_peers_table()
+            self._refresh_peers_table()
+        elif table_id == "models-table":
+            self._models_sort_reverse = not self._models_sort_reverse if event.column_key == self._models_sort_column_key else False
+            self._models_sort_column_key = event.column_key
+            self._refresh_models_table()
+        elif table_id == "ir3de-stats-table":
+            self._stats_sort_reverse = not self._stats_sort_reverse if event.column_key == self._stats_sort_column_key else False
+            self._stats_sort_column_key = event.column_key
+            self._refresh_ir3de_stats_table()
 
     def _should_show_log(self, msg_type) -> bool:
         key = "no-tag" if msg_type is None else msg_type
@@ -460,26 +498,151 @@ class SimApp(App):
         widget.update(f"Budget: ${self.peer.budget:.4f}")
 
     def _refresh_models_table(self):
-        assert self.peer is not None
+        if self.peer is None:
+            return
+
+        pk = self._resolve_selected_pk()
+        assert pk is not None
+        is_self = (pk == self.peer.public_key)
+
+        # Title
+        title = self.query_one("#models-title", Static)
+        title.update("Local Models" if is_self else f"{self._selected_peer_name(pk)} Models")
+
+        # Data
+        rows = []
+        if is_self:
+            for model_utils in self.peer.models:
+                model = model_utils["model"]
+                model_type = getattr(model.config, "model_type", "unknown")
+                num_params = sum(p.numel() for p in model.parameters())
+                tags = ", ".join(model_utils.get("tags", []) or [])
+                in_cost  = model_utils.get("costs_per_input_byte")
+                out_cost = model_utils.get("costs_per_output_token")
+                rows.append((model_type, num_params, tags, in_cost, out_cost))
+        else:
+            info = self.peer.known_public_keys.get(pk, {})
+            for mi in info.get("models_info", []):
+                model_type = mi.get("type", "unknown")   # not shared by remote peers
+                num_params = mi.get("size", 0)
+                tags = ", ".join(mi.get("tags", []) or [])
+                in_cost  = mi.get("costs_per_input_byte")
+                out_cost = mi.get("costs_per_output_token")
+                rows.append((model_type, num_params, tags, in_cost, out_cost))
+
+        # Convert to {raw, display} shape (same as before)
+        data = [{
+            "raw": {
+                self._col_models_type:     mt.lower(),
+                self._col_models_params:   np_,
+                self._col_models_tags:     tg.lower(),
+                self._col_models_in_cost:  ic  if ic  is not None else float("inf"),
+                self._col_models_out_cost: oc  if oc  is not None else float("inf"),
+            },
+            "display": (
+                mt,
+                format_params(np_),
+                tg,
+                f"${ic:.6f}"  if ic  is not None else "—",
+                f"${oc:.6f}" if oc is not None else "—",
+            ),
+        } for (mt, np_, tg, ic, oc) in rows]
+
         table = self.query_one("#models-table", DataTable)
+        saved_x, saved_y = table.scroll_x, table.scroll_y
+        data.sort(key=lambda r: r["raw"][self._models_sort_column_key],
+                reverse=self._models_sort_reverse)
         table.clear()
-        for model_utils in self.peer.models:
-            model = model_utils["model"]
-            model_type = getattr(model.config, "model_type", "unknown")
-            num_params = sum(p.numel() for p in model.parameters())
-            tags = ", ".join(model_utils.get("tags", []) or [])
-            table.add_row(model_type, format_params(num_params), tags)
+        for r in data:
+            table.add_row(*r["display"])
+        self._update_sort_arrows(table, [
+            (self._col_models_type,     "Model Type"),
+            (self._col_models_params,   "Parameters"),
+            (self._col_models_tags,     "Expertise"),
+            (self._col_models_in_cost,  "$ / input byte"),
+            (self._col_models_out_cost, "$ / output token"),
+        ], self._models_sort_column_key, self._models_sort_reverse)
+        self.call_after_refresh(lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False)) 
 
     def _refresh_ir3de_stats_table(self):
-        assert self.peer is not None
+        if self.peer is None:
+            return
+
+        pk = self._resolve_selected_pk()
+        assert pk is not None
+        is_self = (pk == self.peer.public_key)
+
+        title = self.query_one("#stats-title", Static)
+        title.update("Local IR3DE Stats" if is_self else f"{self._selected_peer_name(pk)} IR3DE Stats")
+
+        raw_rows = []
+        if is_self:
+            for stats_info, stats in zip(self.peer.stats_info, self.peer.stats):
+                tokenizer = stats_info.get("tokenizer_name", "?")
+                embedder  = stats_info.get("embedder_name", "?")
+                datasets  = ", ".join(stats.get("datasets", []) or [])
+                tags      = ", ".join(stats.get("tags", []) or [])
+                raw_rows.append((tokenizer, embedder, datasets, tags))
+        else:
+            info = self.peer.known_public_keys.get(pk, {})
+            for si in info.get("stats_info", []):
+                tokenizer = si.get("tokenizer_name", "?")
+                embedder  = si.get("embedder_name", "?")
+                datasets  = ", ".join(si.get("datasets_names", []) or [])
+                tags      = ", ".join(si.get("tags", []) or [])
+                raw_rows.append((tokenizer, embedder, datasets, tags))
+
+        data = [{
+            "raw": {
+                self._col_stats_tok:  tok.lower(),
+                self._col_stats_emb:  emb.lower(),
+                self._col_stats_ds:   ds.lower(),
+                self._col_stats_tags: tg.lower(),
+            },
+            "display": (tok, emb, ds, tg),
+        } for (tok, emb, ds, tg) in raw_rows]
+
         table = self.query_one("#ir3de-stats-table", DataTable)
+        saved_x, saved_y = table.scroll_x, table.scroll_y
+        data.sort(key=lambda r: r["raw"][self._stats_sort_column_key],
+                reverse=self._stats_sort_reverse)
         table.clear()
-        for stats_info, stats in zip(self.peer.stats_info, self.peer.stats):
-            tokenizer = stats_info.get("tokenizer_name", "?")
-            embedder  = stats_info.get("embedder_name", "?")
-            datasets  = ", ".join(stats.get("datasets", []) or [])
-            tags      = ", ".join(stats.get("tags", []) or [])
-            table.add_row(tokenizer, embedder, datasets, tags)
+        for r in data:
+            table.add_row(*r["display"])
+        self._update_sort_arrows(table, [
+            (self._col_stats_tok,  "Tokenizer"),
+            (self._col_stats_emb,  "Embedder"),
+            (self._col_stats_ds,   "Dataset"),
+            (self._col_stats_tags, "Expertise"),
+        ], self._stats_sort_column_key, self._stats_sort_reverse)
+        self.call_after_refresh(lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False))
+    
+    def on_data_table_row_selected(self, event: DataTable.RowSelected):
+        if event.control is None or event.control.id != "peers-table":
+            return
+        pk = event.row_key.value if event.row_key else None
+        if not pk:
+            return
+        self._selected_peer_pubkey = pk
+        # Immediately refresh the dependent tables so the UI updates without waiting 2s
+        self._refresh_models_table()
+        self._refresh_ir3de_stats_table()
+    
+    def _resolve_selected_pk(self) -> str | None:
+        """Return the currently-selected pk, falling back to self if it disappears."""
+        if self.peer is None:
+            return None
+        pk = self._selected_peer_pubkey
+        if pk is None or (pk != self.peer.public_key and pk not in self.peer.known_public_keys):
+            return self.peer.public_key
+        return pk
+
+    def _selected_peer_name(self, pk: str) -> str:
+        assert self.peer is not None
+        if pk == self.peer.public_key:
+            return self.peer.node_name
+        info = self.peer.known_public_keys.get(pk, {})
+        return info.get("peer_name") or f"Node {info.get('peer_id', '?')}"
 
 
 class FollowTailLog(RichLog):

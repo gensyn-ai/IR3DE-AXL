@@ -4,6 +4,7 @@ axl
 axl/**
 local_nodes/*.json
 local_nodes/*.pem
+local_nodes/**
 .DS_Store
 *.pyc
 axl-logs

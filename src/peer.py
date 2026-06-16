@@ -111,6 +111,8 @@ class Peer:
                     "costs_per_output_token": model_info.get("costs_per_output_token")
                 }
             )
+            model_info["size"] = sum(p.numel() for p in model.parameters())
+            model_info["type"] = getattr(model.config, "model_type", "unknown")
         return models
 
     def get_stats_info(self):
@@ -532,6 +534,7 @@ class Peer:
                     "tags": model_info.get("tags"),
                     "tokenizer_name": model_info.get("tokenizer"),
                     "size": model_info.get("size"),
+                    "type": model_info.get("type"),
                     "costs_per_input_byte": model_info.get("costs_per_input_byte"),
                     "costs_per_output_token": model_info.get("costs_per_output_token")
                 })

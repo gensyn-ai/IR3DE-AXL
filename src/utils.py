@@ -103,10 +103,10 @@ def log(message, node_id, msg_type=None, msg_id=None, right=False):
         with _log_lock:
             _log_buffer.append(entry)
 
-        if not _filter_predicate(msg_type):
-            return                     # ← skip writing to widget, but keep buffer entry
-
         target = _output_widget if right else _log_widget
+
+        if target is _log_widget and not _filter_predicate(msg_type):
+            return                 # filter applies only to the left logs pane
 
         if target is not None:
             target.write(line)

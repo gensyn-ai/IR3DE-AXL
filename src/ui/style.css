@@ -192,6 +192,7 @@ Tab:focus {
     text-style: bold;
     padding: 0 2;
     margin-top: 1;
+    margin-bottom: 1;
 }
 
 #stats-tables-row {
@@ -217,4 +218,8 @@ Tab:focus {
     height: 8;
     width: 100%;
     border: solid #888888;
+}
+
+#peers-title {
+    margin-left: 2;
 }
