@@ -223,3 +223,28 @@ Tab:focus {
 #peers-title {
     margin-left: 2;
 }
+
+#tag-bars {
+    width: 49%;
+    margin: 0 2 1 2;
+}
+
+#tag-bars-header {
+    width: 49%;
+    height: 1;
+    margin: 0 2;
+}
+
+#tag-bars-title {
+    width: 1fr;            /* push the chip to the right edge */
+}
+
+#show-all-chip {
+    width: auto;
+    content-align: right middle;
+}
+
+FilterChip:hover, ActionChip:hover, ToggleChip:hover {
+    background: #333333;
+    text-style: bold;
+}

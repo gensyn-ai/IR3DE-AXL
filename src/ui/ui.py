@@ -6,6 +6,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
+from textual_plotext import PlotextPlot
 from rich.text import Text
 from utils import log, MSG_TYPE_COLORS, set_filter_predicate, ipv6_from_pubkey
 
@@ -136,6 +137,32 @@ class FilterChip(Static):
         self.post_message(self.Toggled(self.msg_type, self.active))
 
 
+class ToggleChip(Static):
+    """Chip that toggles between plain and bold styling on click."""
+
+    class Toggled(Message):
+        def __init__(self, chip_id: str, active: bool):
+            super().__init__()
+            self.chip_id = chip_id
+            self.active = active
+
+    def __init__(self, label: str, color: str = "#ffffff", **kwargs):
+        super().__init__(**kwargs)
+        self.label = label
+        self.color = color
+        self.active = False
+        self._refresh_label()
+
+    def _refresh_label(self):
+        style = f"bold {self.color}" if self.active else self.color
+        self.update(Text(f"[{self.label.upper()}]", style=style))
+
+    def on_click(self, event):
+        self.active = not self.active
+        self._refresh_label()
+        self.post_message(self.Toggled(self.id or "", self.active))
+
+
 class SimApp(App):
     CSS = read_css()
     BINDINGS = [("ctrl+c", "quit", "Quit")]
@@ -149,6 +176,7 @@ class SimApp(App):
         self._active_filters: set[str] = set(MSG_TYPE_COLORS.keys()) | {"no-tag"}
         self._filters_enabled = False
         self._selected_peer_pubkey: str | None = None   # None until first refresh; defaults to self
+        self._show_all_experts = False
 
     def compose(self) -> ComposeResult:
 
@@ -187,12 +215,15 @@ class SimApp(App):
                         yield DataTable(id="peers-table")
                         with Horizontal(id="stats-tables-row"):
                             with Vertical(classes="stats-table-container"):
-                                yield Static("Local Models", id="models-title", classes="stats-table-title")
+                                yield Static("Local models", id="models-title", classes="stats-table-title")
                                 yield DataTable(id="models-table")
                             with Vertical(classes="stats-table-container"):
-                                yield Static("Local IR3DE Stats", id="stats-title", classes="stats-table-title")
+                                yield Static("Local IR3DE stats", id="stats-title", classes="stats-table-title")
                                 yield DataTable(id="ir3de-stats-table")
-                        
+                        with Horizontal(id="tag-bars-header"):
+                            yield Static("Experts per tag", id="tag-bars-title", classes="stats-table-title")
+                            yield ToggleChip("show all", id="show-all-chip")
+                        yield PlotextPlot(id="tag-bars")
 
             yield Static("", id="border-right")
 
@@ -493,6 +524,7 @@ class SimApp(App):
         self._refresh_models_table()
         self._refresh_ir3de_stats_table()
         self._refresh_peers_table()
+        self._refresh_tag_bars()
 
     def _refresh_budget(self):
         assert self.peer is not None
@@ -522,7 +554,7 @@ class SimApp(App):
 
         # Title
         title = self.query_one("#models-title", Static)
-        title.update("Local Models" if is_self else f"{self._selected_peer_name(pk)} Models")
+        title.update("Local models" if is_self else f"{self._selected_peer_name(pk)} models")
 
         # Build rows
         data = []
@@ -621,7 +653,7 @@ class SimApp(App):
         is_self = (pk == self.peer.public_key)
 
         title = self.query_one("#stats-title", Static)
-        title.update("Local IR3DE Stats" if is_self else f"{self._selected_peer_name(pk)} IR3DE Stats")
+        title.update("Local IR3DE stats" if is_self else f"{self._selected_peer_name(pk)} IR3DE stats")
 
         raw_rows = []
         if is_self:
@@ -680,6 +712,7 @@ class SimApp(App):
         # Immediately refresh the dependent tables so the UI updates without waiting 2s
         self._refresh_models_table()
         self._refresh_ir3de_stats_table()
+        self._refresh_tag_bars()
     
     def _resolve_selected_pk(self) -> str | None:
         """Return the currently-selected pk, falling back to self if it disappears."""
@@ -696,6 +729,82 @@ class SimApp(App):
             return self.peer.node_name
         info = self.peer.known_public_keys.get(pk, {})
         return info.get("peer_name") or f"Node {info.get('peer_id', '?')}"
+
+    def _refresh_tag_bars(self):
+
+        if self.peer is None:
+            return
+
+        pk = self._resolve_selected_pk()
+        assert pk is not None
+        is_self = (pk == self.peer.public_key)
+
+        title = self.query_one("#tag-bars-title", Static)
+        if self._show_all_experts:
+            title.update("All experts per tag")
+        else:
+            title.update(
+                "Local experts per tag" if is_self
+                else f"{self._selected_peer_name(pk)} experts per tag"
+            )
+
+        known_tags: set[str] = set(self.peer.known_tags)
+        model_tag_lists: list[list[str]] = []
+
+        def add_models_from_self():
+            assert self.peer is not None
+            for m in self.peer.models:
+                model_tag_lists.append(list(m.get("tags", []) or []))
+
+        def add_models_from_remote(info: dict):
+            for mi in info.get("models_info", []):
+                model_tag_lists.append(list(mi.get("tags", []) or []))
+
+        if self._show_all_experts:
+            add_models_from_self()
+            for info in self.peer.known_public_keys.values():
+                add_models_from_remote(info)
+        elif is_self:
+            add_models_from_self()
+        else:
+            add_models_from_remote(self.peer.known_public_keys.get(pk, {}))
+
+        counts = {tag: 0 for tag in sorted(known_tags)}
+        for tags in model_tag_lists:
+            for tag in tags:
+                if tag in counts:
+                    counts[tag] += 1
+
+        plot = self.query_one("#tag-bars", PlotextPlot)
+
+        num_bars = len(counts)
+        plot.styles.height = num_bars + 4
+
+        plot.plt.clear_data()
+        plot.plt.clear_figure()
+        plot.plt.theme("dark")
+
+        labels = [f" {tag}" for tag in list(counts.keys())]
+        values = list(counts.values())
+
+        if values:
+            plot.plt.bar(
+                labels, values,
+                orientation="horizontal",
+                width=0.5,
+                color="violet",
+            )
+            max_v = max(values)
+            if max_v > 0:
+                plot.plt.xticks(list(range(0, max_v + 1)))
+
+        plot.plt.xlabel("# experts")
+        plot.refresh()
+
+    def on_toggle_chip_toggled(self, event: ToggleChip.Toggled):
+        if event.chip_id == "show-all-chip":
+            self._show_all_experts = event.active
+            self._refresh_tag_bars()
 
 
 class FollowTailLog(RichLog):
