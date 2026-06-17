@@ -280,7 +280,8 @@ class Peer:
                         "peer_id": self.peer_id,
                         "peer_name": self.node_name,
                         "message": answer,
-                        "price": price
+                        "price": price,
+                        "selected_model": msg.get("selected_model"),
                     }
                     self.send(answer_msg, sender, timeout=timeout)
                 
@@ -290,7 +291,11 @@ class Peer:
                     log(f"{msg.get('message')}", msg.get("peer_id"), msg_type="text", right=True)
                     log(f"Charged price: {msg.get('price')}", msg.get("peer_id"), msg_type="budget")
                     log(f"Budget before answer: {self.budget}", msg.get("peer_id"), msg_type="budget")
-                    self.budget -= msg.get("price", 0)
+                    price = msg.get("price")
+                    self.budget -= price
+                    if "total_spent" not in self.known_public_keys[sender]["models_info"][msg.get("selected_model")[1]]:
+                        self.known_public_keys[sender]["models_info"][msg.get("selected_model")[1]]["total_spent"] = 0.0
+                    self.known_public_keys[sender]["models_info"][msg.get("selected_model")[1]]["total_spent"] += price
                     log(f"Budget after answer: {self.budget}", msg.get("peer_id"), msg_type="budget")
 
                     if msg.get("orig_msg_id") in self.awaiting_acks:
@@ -353,7 +358,17 @@ class Peer:
                     if sender not in self.known_public_keys:
                         self.new_peer_discovered(msg, sender)
                     
-                    self.known_public_keys[sender]["models_info"] = msg.get("models_info", [])
+                    # Preserve locally-tracked num_requests across info updates
+                    new_models_info = msg.get("models_info", [])
+                    old_models_info = self.known_public_keys[sender].get("models_info", [])
+                    for i, new_mi in enumerate(new_models_info):
+                        if i < len(old_models_info):
+                            if "num_requests" in old_models_info[i]:
+                                new_mi["num_requests"] = old_models_info[i]["num_requests"]
+                            if "total_spent" in old_models_info[i]:
+                                new_mi["total_spent"] = old_models_info[i]["total_spent"]
+                    
+                    self.known_public_keys[sender]["models_info"] = new_models_info
                     self.known_public_keys[sender]["stats_info"] = msg.get("stats_info", [])
                     
                     for model_info in msg.get("models_info", []):
@@ -746,6 +761,9 @@ class Peer:
             log(f"Local model with tag '{assigned_tag}' found. Using the local model to process the input.", self.peer_id, msg_type="ir3de")
             random.shuffle(local_models)
             selected_model = (self.public_key, local_models[0])
+            if 'num_requests' not in self.models[selected_model[1]]:
+                self.models[selected_model[1]]['num_requests'] = 0
+            self.models[selected_model[1]]['num_requests'] += 1
             return selected_model
 
         if len(valid_peers) == 0:
@@ -760,6 +778,10 @@ class Peer:
         selected_peer = valid_peers[0]
         log(f"Selected peer {selected_peer[0][:8]}... with model index {selected_peer[1]} to handle the user input.", self.peer_id, msg_type="ir3de")
         
+        if 'num_requests' not in self.known_public_keys[selected_peer[0]]["models_info"][selected_peer[1]]:
+            self.known_public_keys[selected_peer[0]]["models_info"][selected_peer[1]]['num_requests'] = 0
+        self.known_public_keys[selected_peer[0]]["models_info"][selected_peer[1]]['num_requests'] += 1
+
         return selected_peer
 
 
@@ -797,6 +819,11 @@ class Peer:
 
             log(f"Answer processed locally.", self.peer_id, msg_type="text")
             log(f"{answer}", self.peer_id, msg_type="text", right=True)
+
+            if 'num_requests' not in self.models[selected_model[1]]:
+                self.models[selected_model[1]]['num_requests'] = 0
+            self.models[selected_model[1]]['num_requests'] += 1
+            
             return
         
         msg_id = str(uuid.uuid4())

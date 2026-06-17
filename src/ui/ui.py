@@ -238,16 +238,18 @@ class SimApp(App):
         # Models table setup
         models_table = self.query_one("#models-table", DataTable)
         (self._col_models_type, self._col_models_params, self._col_models_tags,
-         self._col_models_in_cost, self._col_models_out_cost) = models_table.add_columns(
+         self._col_models_in_cost, self._col_models_out_cost, self._col_models_num_requests) = models_table.add_columns(
             "Model Type  ",
             "Parameters  ",
             "Expertise  ",
             Text("$ / input byte  "),
             Text("$ / output token  "),
+            "Num requests  "
         )
         models_table.zebra_stripes = True
         self._models_sort_column_key = self._col_models_type
         self._models_sort_reverse = False
+        self._col_models_total_spent = None        # added/removed at refresh time
 
         # IR3DE stats table setup
         stats_table = self.query_one("#ir3de-stats-table", DataTable)
@@ -505,12 +507,25 @@ class SimApp(App):
         assert pk is not None
         is_self = (pk == self.peer.public_key)
 
+        table = self.query_one("#models-table", DataTable)
+        saved_x, saved_y = table.scroll_x, table.scroll_y
+
+        # Manage "Total spent" column: present only for remote peers
+        if is_self and self._col_models_total_spent is not None:
+            if self._models_sort_column_key == self._col_models_total_spent:
+                self._models_sort_column_key = self._col_models_type
+                self._models_sort_reverse = False
+            table.remove_column(self._col_models_total_spent)
+            self._col_models_total_spent = None
+        elif not is_self and self._col_models_total_spent is None:
+            self._col_models_total_spent = table.add_column("Total spent  ")
+
         # Title
         title = self.query_one("#models-title", Static)
         title.update("Local Models" if is_self else f"{self._selected_peer_name(pk)} Models")
 
-        # Data
-        rows = []
+        # Build rows
+        data = []
         if is_self:
             for model_utils in self.peer.models:
                 model = model_utils["model"]
@@ -519,50 +534,83 @@ class SimApp(App):
                 tags = ", ".join(model_utils.get("tags", []) or [])
                 in_cost  = model_utils.get("costs_per_input_byte")
                 out_cost = model_utils.get("costs_per_output_token")
-                rows.append((model_type, num_params, tags, in_cost, out_cost))
+                num_requests = model_utils.get("num_requests", 0)
+                data.append({
+                    "raw": {
+                        self._col_models_type:         model_type.lower(),
+                        self._col_models_params:       num_params,
+                        self._col_models_tags:         tags.lower(),
+                        self._col_models_in_cost:      in_cost  if in_cost  is not None else float("inf"),
+                        self._col_models_out_cost:     out_cost if out_cost is not None else float("inf"),
+                        self._col_models_num_requests: num_requests,
+                    },
+                    "display": (
+                        model_type,
+                        format_params(num_params),
+                        tags,
+                        f"${in_cost:.6f}"  if in_cost  is not None else "—",
+                        f"${out_cost:.6f}" if out_cost is not None else "—",
+                        str(num_requests),
+                    ),
+                })
         else:
             info = self.peer.known_public_keys.get(pk, {})
             for mi in info.get("models_info", []):
-                model_type = mi.get("type", "unknown")   # not shared by remote peers
+                model_type = mi.get("type", "unknown")
                 num_params = mi.get("size", 0)
                 tags = ", ".join(mi.get("tags", []) or [])
                 in_cost  = mi.get("costs_per_input_byte")
                 out_cost = mi.get("costs_per_output_token")
-                rows.append((model_type, num_params, tags, in_cost, out_cost))
+                num_requests = mi.get("num_requests", 0)
+                total_spent  = mi.get("total_spent", 0.0)
+                data.append({
+                    "raw": {
+                        self._col_models_type:         model_type.lower(),
+                        self._col_models_params:       num_params,
+                        self._col_models_tags:         tags.lower(),
+                        self._col_models_in_cost:      in_cost  if in_cost  is not None else float("inf"),
+                        self._col_models_out_cost:     out_cost if out_cost is not None else float("inf"),
+                        self._col_models_num_requests: num_requests,
+                        self._col_models_total_spent:  total_spent,
+                    },
+                    "display": (
+                        model_type,
+                        format_params(num_params),
+                        tags,
+                        f"${in_cost:.6f}"  if in_cost  is not None else "—",
+                        f"${out_cost:.6f}" if out_cost is not None else "—",
+                        str(num_requests),
+                        f"${total_spent:.4f}",
+                    ),
+                })
 
-        # Convert to {raw, display} shape (same as before)
-        data = [{
-            "raw": {
-                self._col_models_type:     mt.lower(),
-                self._col_models_params:   np_,
-                self._col_models_tags:     tg.lower(),
-                self._col_models_in_cost:  ic  if ic  is not None else float("inf"),
-                self._col_models_out_cost: oc  if oc  is not None else float("inf"),
-            },
-            "display": (
-                mt,
-                format_params(np_),
-                tg,
-                f"${ic:.6f}"  if ic  is not None else "—",
-                f"${oc:.6f}" if oc is not None else "—",
-            ),
-        } for (mt, np_, tg, ic, oc) in rows]
-
-        table = self.query_one("#models-table", DataTable)
-        saved_x, saved_y = table.scroll_x, table.scroll_y
         data.sort(key=lambda r: r["raw"][self._models_sort_column_key],
                 reverse=self._models_sort_reverse)
+
         table.clear()
         for r in data:
             table.add_row(*r["display"])
-        self._update_sort_arrows(table, [
-            (self._col_models_type,     "Model Type"),
-            (self._col_models_params,   "Parameters"),
-            (self._col_models_tags,     "Expertise"),
-            (self._col_models_in_cost,  "$ / input byte"),
-            (self._col_models_out_cost, "$ / output token"),
-        ], self._models_sort_column_key, self._models_sort_reverse)
-        self.call_after_refresh(lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False)) 
+
+        columns = [
+            (self._col_models_type,         "Model Type"),
+            (self._col_models_params,       "Parameters"),
+            (self._col_models_tags,         "Expertise"),
+            (self._col_models_in_cost,      "$ / input byte"),
+            (self._col_models_out_cost,     "$ / output token"),
+            (self._col_models_num_requests, "Num requests"),
+        ]
+        if self._col_models_total_spent is not None:
+            columns.append((self._col_models_total_spent, "Total spent"))
+
+        self._update_sort_arrows(table, columns,
+                                self._models_sort_column_key, self._models_sort_reverse)
+        
+        # Synchronous restore — eliminates the "snap to 0" frame.
+        table.scroll_to(x=saved_x, y=saved_y, animate=False)
+        # Async backup — covers the case where the sync call ran before the
+        # table's virtual size was recomputed and got clamped to 0.
+        
+        self.call_after_refresh(lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False))
 
     def _refresh_ir3de_stats_table(self):
         if self.peer is None:
@@ -615,6 +663,11 @@ class SimApp(App):
             (self._col_stats_ds,   "Dataset"),
             (self._col_stats_tags, "Expertise"),
         ], self._stats_sort_column_key, self._stats_sort_reverse)
+
+        # Synchronous restore — eliminates the "snap to 0" frame.
+        table.scroll_to(x=saved_x, y=saved_y, animate=False)
+        # Async backup — covers the case where the sync call ran before the
+        # table's virtual size was recomputed and got clamped to 0.
         self.call_after_refresh(lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False))
     
     def on_data_table_row_selected(self, event: DataTable.RowSelected):
