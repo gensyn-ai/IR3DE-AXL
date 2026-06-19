@@ -3,8 +3,8 @@ import threading
 from utils import format_params, set_log_widget, set_output_widget
 
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable
-from textual.containers import Horizontal, Vertical
+from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable, Input
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual_plotext import PlotextPlot
 from rich.text import Text
@@ -58,7 +58,7 @@ def disable_filters(app):
 def enable_filters(app):
     def _enable():
         if app._filters_enabled:
-            return                       # idempotent, like enable_input
+            return
         app.query_one("#filter-toggle", Static).styles.color = "#888888"
         app._filters_enabled = True
     app.call_from_thread(_enable)
@@ -163,6 +163,29 @@ class ToggleChip(Static):
         self.post_message(self.Toggled(self.id or "", self.active))
 
 
+class FollowTailLog(RichLog):
+    """RichLog that only auto-scrolls when the user is already at the bottom."""
+
+    def write(
+        self,
+        content,
+        width=None,
+        expand=False,
+        shrink=True,
+        scroll_end=None,
+        animate=False,
+    ):
+        at_bottom = self.scroll_y >= self.max_scroll_y - 1
+        return super().write(
+            content,
+            width=width,
+            expand=expand,
+            shrink=shrink,
+            scroll_end=at_bottom,    # still always recomputed
+            animate=animate,
+        )
+    
+
 class SimApp(App):
     CSS = read_css()
     BINDINGS = [("ctrl+c", "quit", "Quit")]
@@ -177,6 +200,8 @@ class SimApp(App):
         self._filters_enabled = False
         self._selected_peer_pubkey: str | None = None   # None until first refresh; defaults to self
         self._show_all_experts = False
+        self._show_all_costs = False
+        self._cost_input_bytes = 1024
 
     def compose(self) -> ComposeResult:
 
@@ -210,23 +235,33 @@ class SimApp(App):
                             yield Static("[SEND]", id="send-button", markup=False)
                     
                     with TabPane("Statistics", id="tab-stats"):
-                        yield Static("", id="budget-display")
-                        yield Static("Known Peers", id="peers-title", classes="stats-table-title")
-                        yield DataTable(id="peers-table")
-                        with Horizontal(id="stats-tables-row"):
-                            with Vertical(classes="stats-table-container"):
-                                yield Static("Local models", id="models-title", classes="stats-table-title")
-                                yield DataTable(id="models-table")
-                            with Vertical(classes="stats-table-container"):
-                                yield Static("Local IR3DE stats", id="stats-title", classes="stats-table-title")
-                                yield DataTable(id="ir3de-stats-table")
-                        with Horizontal(id="tag-bars-header"):
-                            yield Static("Experts per tag", id="tag-bars-title", classes="stats-table-title")
-                            yield ToggleChip("show all", id="show-all-chip")
-                        yield PlotextPlot(id="tag-bars")
+                        with VerticalScroll(id="stats-scroll"):
+                            yield Static("", id="budget-display")
+                            yield Static("Known Peers", id="peers-title", classes="stats-table-title")
+                            yield DataTable(id="peers-table")
+                            with Horizontal(id="stats-tables-row"):
+                                with Vertical(classes="stats-table-container"):
+                                    yield Static("Local models", id="models-title", classes="stats-table-title")
+                                    yield DataTable(id="models-table")
+                                with Vertical(classes="stats-table-container"):
+                                    yield Static("Local IR3DE stats", id="stats-title", classes="stats-table-title")
+                                    yield DataTable(id="ir3de-stats-table")
+                            with Horizontal(id="plots-row"):
+                                with Vertical(classes="plot-pane"):
+                                    with Horizontal(id="tag-bars-header"):
+                                        yield Static("Experts per tag", id="tag-bars-title", classes="stats-table-title")
+                                        yield ToggleChip("show all", id="show-all-chip")
+                                    yield PlotextPlot(id="tag-bars")
+                                with Vertical(classes="plot-pane"):
+                                    with Horizontal(id="cost-plot-header"):
+                                        yield Static("Cost vs parameters", id="cost-plot-title", classes="stats-table-title")
+                                        yield ToggleChip("show all", id="show-all-costs-chip")
+                                    with Horizontal(id="cost-input-row"):
+                                        yield Static("Input bytes:", id="cost-input-label")
+                                        yield Input(value="1024", id="cost-input", type="integer")
+                                    yield PlotextPlot(id="cost-plot")
 
             yield Static("", id="border-right")
-
         yield Static("", id="bottom-bar")
 
     def on_mount(self):
@@ -238,7 +273,7 @@ class SimApp(App):
         set_log_widget(log_widget)
         set_output_widget(output_widget)
 
-        self.query_one("#user-input", TextArea).focus()  # <-- give input focus
+        self.query_one("#user-input", TextArea).focus()
 
         self.call_after_refresh(self._fill_input_divider)
 
@@ -257,7 +292,7 @@ class SimApp(App):
         self._col_name, self._col_pubkey, self._col_ipv6 = table.add_columns(
             "Name", "Public Key", "IPv6 address"
         )
-        self._sort_column_key = self._col_name      # default: sort by Name
+        self._sort_column_key = self._col_name
         self._sort_reverse = False                  # default: ascending
 
         table.cursor_type = "row"
@@ -307,7 +342,6 @@ class SimApp(App):
         table = self.query_one("#peers-table", DataTable)
         saved_x, saved_y = table.scroll_x, table.scroll_y
 
-        # Default selection to self on first run
         if self._selected_peer_pubkey is None:
             self._selected_peer_pubkey = self.peer.public_key
 
@@ -417,9 +451,9 @@ class SimApp(App):
 
     def on_resize(self, event):
         self._fill_bars()
-        self._fill_input_divider()                  # ← duplicate removed
+        self._fill_input_divider()
         drawer = self.query_one("#filter-drawer")
-        if drawer.styles.display != "none":         # ← only relayout when open
+        if drawer.styles.display != "none":
             self._layout_filter_chips()
     
     def _fill_bars(self):
@@ -432,7 +466,7 @@ class SimApp(App):
             return
         if event.control.id == "filter-toggle":
             if not self._filters_enabled:
-                return                       # silently ignore clicks while disabled
+                return  # silently ignore clicks while disabled
             self._toggle_drawer()
         elif event.control.id == "send-button":
             if event.control.disabled:
@@ -445,25 +479,21 @@ class SimApp(App):
         is_hidden = drawer.styles.display == "none"
         drawer.styles.display = "block" if is_hidden else "none"
         toggle.update("filters ▴" if is_hidden else "filters ▾")
-        if is_hidden:                               # just opened
+        if is_hidden:
             self.call_after_refresh(self._layout_filter_chips)
     
     def _layout_filter_chips(self):
         drawer = self.query_one("#filter-drawer", Vertical)
         if drawer.styles.display == "none":
-            return                                       # ← bail when hidden
+            return
         avail = drawer.size.width
         if avail <= 0:
             self.call_after_refresh(self._layout_filter_chips)
             return
 
-        # Tear down the previous rows
         for child in list(drawer.children):
             child.remove()
 
-        # Spec list: (kind, label, color).
-        #   'action' → ActionChip (one-shot click, no toggle state)
-        #   'filter' → FilterChip (toggleable membership in _active_filters)
         chip_specs: list[tuple[str, str, str]] = [
             ("action", "all",    "#ffffff"),
             ("action", "none",   "#ffffff"),
@@ -471,11 +501,11 @@ class SimApp(App):
         ] + [("filter", name, color) for name, color in MSG_TYPE_COLORS.items()]
 
         # Group chips into rows that fit horizontally
-        chip_margin = 1                                  # must match CSS margin-right
+        chip_margin = 1  # must match CSS margin-right
         rows: list[list[tuple[str, str, str]]] = []
         current, used = [], 0
         for kind, name, color in chip_specs:
-            chip_w = len(name) + 2 + chip_margin         # "[name]" + margin
+            chip_w = len(name) + 2 + chip_margin
             if current and used + chip_w > avail:
                 rows.append(current)
                 current, used = [], 0
@@ -504,7 +534,7 @@ class SimApp(App):
         elif event.action == "none":
             self._active_filters = set()
         else:
-            return                           # unknown action, ignore
+            return
 
         self._refresh_chip_states()
         self._rerender_logs()
@@ -525,6 +555,7 @@ class SimApp(App):
         self._refresh_ir3de_stats_table()
         self._refresh_peers_table()
         self._refresh_tag_bars()
+        self._refresh_cost_plot()
 
     def _refresh_budget(self):
         assert self.peer is not None
@@ -552,7 +583,6 @@ class SimApp(App):
         elif not is_self and self._col_models_total_spent is None:
             self._col_models_total_spent = table.add_column("Total spent  ")
 
-        # Title
         title = self.query_one("#models-title", Static)
         title.update("Local models" if is_self else f"{self._selected_peer_name(pk)} models")
 
@@ -639,9 +669,6 @@ class SimApp(App):
         
         # Synchronous restore — eliminates the "snap to 0" frame.
         table.scroll_to(x=saved_x, y=saved_y, animate=False)
-        # Async backup — covers the case where the sync call ran before the
-        # table's virtual size was recomputed and got clamped to 0.
-        
         self.call_after_refresh(lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False))
 
     def _refresh_ir3de_stats_table(self):
@@ -698,8 +725,6 @@ class SimApp(App):
 
         # Synchronous restore — eliminates the "snap to 0" frame.
         table.scroll_to(x=saved_x, y=saved_y, animate=False)
-        # Async backup — covers the case where the sync call ran before the
-        # table's virtual size was recomputed and got clamped to 0.
         self.call_after_refresh(lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False))
     
     def on_data_table_row_selected(self, event: DataTable.RowSelected):
@@ -713,6 +738,7 @@ class SimApp(App):
         self._refresh_models_table()
         self._refresh_ir3de_stats_table()
         self._refresh_tag_bars()
+        self._refresh_cost_plot()
     
     def _resolve_selected_pk(self) -> str | None:
         """Return the currently-selected pk, falling back to self if it disappears."""
@@ -805,26 +831,80 @@ class SimApp(App):
         if event.chip_id == "show-all-chip":
             self._show_all_experts = event.active
             self._refresh_tag_bars()
+        elif event.chip_id == "show-all-costs-chip":
+            self._show_all_costs = event.active
+            self._refresh_cost_plot()
+    
+    def on_input_changed(self, event: Input.Submitted):
+        if event.input.id == "cost-input":
+            try:
+                n = int(event.value)
+            except ValueError:
+                return
+            if n < 0:
+                return
+            self._cost_input_bytes = n
+            self._refresh_cost_plot()
 
+    def _refresh_cost_plot(self):
+        if self.peer is None:
+            return
 
-class FollowTailLog(RichLog):
-    """RichLog that only auto-scrolls when the user is already at the bottom."""
+        pk = self._resolve_selected_pk()
+        assert pk is not None
+        is_self = (pk == self.peer.public_key)
 
-    def write(
-        self,
-        content,
-        width=None,
-        expand=False,
-        shrink=True,
-        scroll_end=None,
-        animate=False,
-    ):
-        at_bottom = self.scroll_y >= self.max_scroll_y - 1
-        return super().write(
-            content,
-            width=width,
-            expand=expand,
-            shrink=shrink,
-            scroll_end=at_bottom,    # still always recomputed
-            animate=animate,
-        )
+        title = self.query_one("#cost-plot-title", Static)
+        if self._show_all_costs:
+            title.update("All model costs")
+        else:
+            title.update(
+                "Local model costs" if is_self
+                else f"{self._selected_peer_name(pk)} model costs"
+            )
+
+        INPUT_BYTES = self._cost_input_bytes
+        xs: list[float] = []
+        ys: list[float] = []
+
+        def add_self_models():
+            assert self.peer is not None
+            for m in self.peer.models:
+                model = m["model"]
+                num_params = sum(p.numel() for p in model.parameters())
+                xs.append(num_params)
+                ys.append(0.0)  # local cost is always 0
+
+        def add_remote_models(info: dict):
+            for mi in info.get("models_info", []):
+                num_params = mi.get("size", 0)
+                in_cost   = mi.get("costs_per_input_byte")
+                out_cost  = mi.get("costs_per_output_token")
+                max_out   = mi.get("max_output_tokens") or mi.get("max_new_tokens") or 0
+                if not num_params or in_cost is None or out_cost is None:
+                    continue
+                xs.append(num_params)
+                ys.append(in_cost * INPUT_BYTES + out_cost * max_out)
+
+        if self._show_all_costs:
+            add_self_models()
+            for info in self.peer.known_public_keys.values():
+                add_remote_models(info)
+        elif is_self:
+            add_self_models()
+        else:
+            add_remote_models(self.peer.known_public_keys.get(pk, {}))
+
+        plot = self.query_one("#cost-plot", PlotextPlot)
+        plot.plt.clear_data()
+        plot.plt.clear_figure()
+        plot.plt.theme("dark")
+
+        if xs:
+            plot.plt.scatter(xs, ys, color="cyan", marker="●")
+            plot.plt.xlabel("# parameters")
+            plot.plt.ylabel(f"cost ($) — {INPUT_BYTES}B in")
+            if max(ys) == 0:
+                plot.plt.ylim(-1, 1)
+
+        plot.refresh()

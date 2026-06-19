@@ -115,7 +115,6 @@ def run_peer(app, args):
         with open(path, "a") as f:
             traceback.print_exc(file=f)
 
-        # Shut down the Textual app from this thread
         if app is not None:
             app.call_from_thread(app.exit)
 
