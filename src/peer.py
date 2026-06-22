@@ -17,6 +17,9 @@ AXL = "http://127.0.0.1:91"
 class Peer:
 
     def __init__(self, peer_id, ir3de_lambda=0.01, ir3de_entropy_top_k=10, max_answer_length=256):
+        
+        with open(f"ir3de_stats/default_stats.json", "r") as f:
+            default_stats = json.load(f)
 
         with open(f"local_nodes/metadata{peer_id:02d}.json", "r") as f:
             metadata = json.load(f)
@@ -46,7 +49,7 @@ class Peer:
         self.known_tags = []
         self.models_info = metadata.get("models", [])
         self.models = self.get_models_info()
-        self.stats_info = metadata.get("stats", [])
+        self.stats_info = default_stats.get("stats", []) + metadata.get("stats", [])
         self.stats = self.get_stats_info()
 
         # FUTURE WORK: allow the user for chosing the desired tokenizer and embedder with the UI. Using always the default for now.
