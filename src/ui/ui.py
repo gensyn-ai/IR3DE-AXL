@@ -3,7 +3,7 @@ import threading
 from utils import format_params, set_log_widget, set_output_widget
 
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable, Input
+from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual_plotext import PlotextPlot
@@ -200,8 +200,6 @@ class SimApp(App):
         self._filters_enabled = False
         self._selected_peer_pubkey: str | None = None   # None until first refresh; defaults to self
         self._show_all_experts = False
-        self._show_all_costs = False
-        self._cost_input_bytes = 1024
 
     def compose(self) -> ComposeResult:
 
@@ -236,7 +234,6 @@ class SimApp(App):
                     
                     with TabPane("Statistics", id="tab-stats"):
                         with VerticalScroll(id="stats-scroll"):
-                            yield Static("", id="budget-display")
                             yield Static("Known Peers", id="peers-title", classes="stats-table-title")
                             yield DataTable(id="peers-table")
                             with Horizontal(id="stats-tables-row"):
@@ -252,15 +249,6 @@ class SimApp(App):
                                         yield Static("Experts per tag", id="tag-bars-title", classes="stats-table-title")
                                         yield ToggleChip("show all", id="show-all-chip")
                                     yield PlotextPlot(id="tag-bars")
-                                with Vertical(classes="plot-pane"):
-                                    with Horizontal(id="cost-plot-header"):
-                                        yield Static("Cost vs parameters", id="cost-plot-title", classes="stats-table-title")
-                                        yield ToggleChip("show all", id="show-all-costs-chip")
-                                    with Horizontal(id="cost-input-row"):
-                                        yield Static("Input bytes:", id="cost-input-label")
-                                        yield Input(value="1024", id="cost-input", type="integer")
-                                    yield PlotextPlot(id="cost-plot")
-
             yield Static("", id="border-right")
         yield Static("", id="bottom-bar")
 
@@ -303,19 +291,15 @@ class SimApp(App):
 
         # Models table setup
         models_table = self.query_one("#models-table", DataTable)
-        (self._col_models_type, self._col_models_params, self._col_models_tags,
-         self._col_models_in_cost, self._col_models_out_cost, self._col_models_num_requests) = models_table.add_columns(
+        self._col_models_type, self._col_models_params, self._col_models_tags, self._col_models_num_requests = models_table.add_columns(
             "Model Type  ",
             "Parameters  ",
             "Expertise  ",
-            Text("$ / input byte  "),
-            Text("$ / output token  "),
             "Num requests  "
         )
         models_table.zebra_stripes = True
         self._models_sort_column_key = self._col_models_type
         self._models_sort_reverse = False
-        self._col_models_total_spent = None        # added/removed at refresh time
 
         # IR3DE stats table setup
         stats_table = self.query_one("#ir3de-stats-table", DataTable)
@@ -550,17 +534,10 @@ class SimApp(App):
     def _refresh_stats_tab(self):
         if self.peer is None:
             return
-        self._refresh_budget()
         self._refresh_models_table()
         self._refresh_ir3de_stats_table()
         self._refresh_peers_table()
         self._refresh_tag_bars()
-        self._refresh_cost_plot()
-
-    def _refresh_budget(self):
-        assert self.peer is not None
-        widget = self.query_one("#budget-display", Static)
-        widget.update(f"Budget: ${self.peer.budget:.4f}")
 
     def _refresh_models_table(self):
         if self.peer is None:
@@ -573,78 +550,49 @@ class SimApp(App):
         table = self.query_one("#models-table", DataTable)
         saved_x, saved_y = table.scroll_x, table.scroll_y
 
-        # Manage "Total spent" column: present only for remote peers
-        if is_self and self._col_models_total_spent is not None:
-            if self._models_sort_column_key == self._col_models_total_spent:
-                self._models_sort_column_key = self._col_models_type
-                self._models_sort_reverse = False
-            table.remove_column(self._col_models_total_spent)
-            self._col_models_total_spent = None
-        elif not is_self and self._col_models_total_spent is None:
-            self._col_models_total_spent = table.add_column("Total spent  ")
-
         title = self.query_one("#models-title", Static)
         title.update("Local models" if is_self else f"{self._selected_peer_name(pk)} models")
 
-        # Build rows
-        data = []
+        # Normalize both sources to the same (model_type, num_params, tags, num_requests) tuple
         if is_self:
-            for model_utils in self.peer.models:
-                model = model_utils["model"]
-                model_type = getattr(model.config, "model_type", "unknown")
-                num_params = sum(p.numel() for p in model.parameters())
-                tags = ", ".join(model_utils.get("tags", []) or [])
-                in_cost  = model_utils.get("costs_per_input_byte")
-                out_cost = model_utils.get("costs_per_output_token")
-                num_requests = model_utils.get("num_requests", 0)
-                data.append({
-                    "raw": {
-                        self._col_models_type:         model_type.lower(),
-                        self._col_models_params:       num_params,
-                        self._col_models_tags:         tags.lower(),
-                        self._col_models_in_cost:      in_cost  if in_cost  is not None else float("inf"),
-                        self._col_models_out_cost:     out_cost if out_cost is not None else float("inf"),
-                        self._col_models_num_requests: num_requests,
-                    },
-                    "display": (
-                        model_type,
-                        format_params(num_params),
-                        tags,
-                        f"${in_cost:.6f}"  if in_cost  is not None else "—",
-                        f"${out_cost:.6f}" if out_cost is not None else "—",
-                        str(num_requests),
-                    ),
-                })
+            raw_models = [
+                (
+                    getattr(m["model"].config, "model_type", "unknown"),
+                    sum(p.numel() for p in m["model"].parameters()),
+                    m.get("tags", []) or [],
+                    m.get("num_requests", 0),
+                )
+                for m in self.peer.models
+            ]
         else:
             info = self.peer.known_public_keys.get(pk, {})
-            for mi in info.get("models_info", []):
-                model_type = mi.get("type", "unknown")
-                num_params = mi.get("size", 0)
-                tags = ", ".join(mi.get("tags", []) or [])
-                in_cost  = mi.get("costs_per_input_byte")
-                out_cost = mi.get("costs_per_output_token")
-                num_requests = mi.get("num_requests", 0)
-                total_spent  = mi.get("total_spent", 0.0)
-                data.append({
-                    "raw": {
-                        self._col_models_type:         model_type.lower(),
-                        self._col_models_params:       num_params,
-                        self._col_models_tags:         tags.lower(),
-                        self._col_models_in_cost:      in_cost  if in_cost  is not None else float("inf"),
-                        self._col_models_out_cost:     out_cost if out_cost is not None else float("inf"),
-                        self._col_models_num_requests: num_requests,
-                        self._col_models_total_spent:  total_spent,
-                    },
-                    "display": (
-                        model_type,
-                        format_params(num_params),
-                        tags,
-                        f"${in_cost:.6f}"  if in_cost  is not None else "—",
-                        f"${out_cost:.6f}" if out_cost is not None else "—",
-                        str(num_requests),
-                        f"${total_spent:.4f}",
-                    ),
-                })
+            raw_models = [
+                (
+                    mi.get("type", "unknown"),
+                    mi.get("size", 0),
+                    mi.get("tags", []) or [],
+                    mi.get("num_requests", 0),
+                )
+                for mi in info.get("models_info", [])
+            ]
+
+        data = []
+        for model_type, num_params, tags, num_requests in raw_models:
+            tags_str = ", ".join(tags)
+            data.append({
+                "raw": {
+                    self._col_models_type:         model_type.lower(),
+                    self._col_models_params:       num_params,
+                    self._col_models_tags:         tags_str.lower(),
+                    self._col_models_num_requests: num_requests,
+                },
+                "display": (
+                    model_type,
+                    format_params(num_params),
+                    tags_str,
+                    str(num_requests),
+                ),
+            })
 
         data.sort(key=lambda r: r["raw"][self._models_sort_column_key],
                 reverse=self._models_sort_reverse)
@@ -657,16 +605,12 @@ class SimApp(App):
             (self._col_models_type,         "Model Type"),
             (self._col_models_params,       "Parameters"),
             (self._col_models_tags,         "Expertise"),
-            (self._col_models_in_cost,      "$ / input byte"),
-            (self._col_models_out_cost,     "$ / output token"),
             (self._col_models_num_requests, "Num requests"),
         ]
-        if self._col_models_total_spent is not None:
-            columns.append((self._col_models_total_spent, "Total spent"))
 
         self._update_sort_arrows(table, columns,
                                 self._models_sort_column_key, self._models_sort_reverse)
-        
+
         # Synchronous restore — eliminates the "snap to 0" frame.
         table.scroll_to(x=saved_x, y=saved_y, animate=False)
         self.call_after_refresh(lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False))
@@ -738,7 +682,6 @@ class SimApp(App):
         self._refresh_models_table()
         self._refresh_ir3de_stats_table()
         self._refresh_tag_bars()
-        self._refresh_cost_plot()
     
     def _resolve_selected_pk(self) -> str | None:
         """Return the currently-selected pk, falling back to self if it disappears."""
@@ -831,80 +774,4 @@ class SimApp(App):
         if event.chip_id == "show-all-chip":
             self._show_all_experts = event.active
             self._refresh_tag_bars()
-        elif event.chip_id == "show-all-costs-chip":
-            self._show_all_costs = event.active
-            self._refresh_cost_plot()
     
-    def on_input_changed(self, event: Input.Submitted):
-        if event.input.id == "cost-input":
-            try:
-                n = int(event.value)
-            except ValueError:
-                return
-            if n < 0:
-                return
-            self._cost_input_bytes = n
-            self._refresh_cost_plot()
-
-    def _refresh_cost_plot(self):
-        if self.peer is None:
-            return
-
-        pk = self._resolve_selected_pk()
-        assert pk is not None
-        is_self = (pk == self.peer.public_key)
-
-        title = self.query_one("#cost-plot-title", Static)
-        if self._show_all_costs:
-            title.update("All model costs")
-        else:
-            title.update(
-                "Local model costs" if is_self
-                else f"{self._selected_peer_name(pk)} model costs"
-            )
-
-        INPUT_BYTES = self._cost_input_bytes
-        xs: list[float] = []
-        ys: list[float] = []
-
-        def add_self_models():
-            assert self.peer is not None
-            for m in self.peer.models:
-                model = m["model"]
-                num_params = sum(p.numel() for p in model.parameters())
-                xs.append(num_params)
-                ys.append(0.0)  # local cost is always 0
-
-        def add_remote_models(info: dict):
-            for mi in info.get("models_info", []):
-                num_params = mi.get("size", 0)
-                in_cost   = mi.get("costs_per_input_byte")
-                out_cost  = mi.get("costs_per_output_token")
-                max_out   = mi.get("max_output_tokens") or mi.get("max_new_tokens") or 0
-                if not num_params or in_cost is None or out_cost is None:
-                    continue
-                xs.append(num_params)
-                ys.append(in_cost * INPUT_BYTES + out_cost * max_out)
-
-        if self._show_all_costs:
-            add_self_models()
-            for info in self.peer.known_public_keys.values():
-                add_remote_models(info)
-        elif is_self:
-            add_self_models()
-        else:
-            add_remote_models(self.peer.known_public_keys.get(pk, {}))
-
-        plot = self.query_one("#cost-plot", PlotextPlot)
-        plot.plt.clear_data()
-        plot.plt.clear_figure()
-        plot.plt.theme("dark")
-
-        if xs:
-            plot.plt.scatter(xs, ys, color="cyan", marker="●")
-            plot.plt.xlabel("# parameters")
-            plot.plt.ylabel(f"cost ($) — {INPUT_BYTES}B in")
-            if max(ys) == 0:
-                plot.plt.ylim(-1, 1)
-
-        plot.refresh()
