@@ -964,7 +964,6 @@ class SimApp(App):
         current = {s._tag: s for s in container.query(ExpertiseSection)}
         desired = sorted(self._selected_tags)
 
-        # Drop deactivated sections — remember current selection before discarding
         for tag, section in list(current.items()):
             if tag not in desired:
                 if tag in self._selected_models:
@@ -972,16 +971,23 @@ class SimApp(App):
                     del self._selected_models[tag]
                 section.remove()
 
-        # Add newly-activated sections — try to restore from memory
         for tag in desired:
             if tag not in current:
                 section = ExpertiseSection(tag, symbol_for_tag(tag))
                 container.mount(section)
-                if tag not in self._selected_models and tag in self._selection_memory:
-                    self._selected_models[tag] = self._selection_memory[tag]
+
+                if tag not in self._selected_models:
+                    if tag in self._selection_memory:
+                        self._selected_models[tag] = self._selection_memory[tag]
+                    else:
+                        candidates = self._gather_candidates_for_tag(tag)
+                        default = self._pick_default_selection(candidates)
+                        if default is not None:
+                            self._selected_models[tag] = default
+                            self._selection_memory[tag] = default
+
                 self.call_after_refresh(lambda t=tag: self._populate_expertise_section(t))
 
-        # Repopulate already-visible sections (new models may have arrived)
         for tag in desired:
             if tag in current:
                 self._populate_expertise_section(tag)
@@ -1001,36 +1007,8 @@ class SimApp(App):
             return
         rows_container = section.query_one(".expertise-section-rows", Vertical)
 
-        def shorten(s: str, n: int) -> str:
-            return s if len(s) <= n else s[:n-3] + "..."
+        candidates = self._gather_candidates_for_tag(tag)
 
-        candidates: list[tuple[str, int, str, str, int]] = []
-
-        # Local
-        for i, m_info in enumerate(self.peer.models_info):
-            if tag not in (m_info.get("tags") or []):
-                continue
-            name = m_info.get("hf_name") or (m_info.get("path") or "unknown").rsplit("/", 1)[-1]
-            candidates.append((
-                self.peer.public_key, i, name,
-                shorten(self.peer.node_name, 7) + " (self)",
-                m_info.get("size", 0),
-            ))
-
-        # Remote
-        for pk, info in self.peer.known_public_keys.items():
-            node = info.get("peer_name") or f"Node {info.get('peer_id', '?')}"
-            for i, mi in enumerate(info.get("models_info") or []):
-                if tag not in (mi.get("tags") or []):
-                    continue
-                candidates.append((
-                    pk, i,
-                    mi.get("name") or mi.get("type", "?"),
-                    shorten(node, 14),
-                    mi.get("size", 0),
-                ))
-
-        # Empty case → placeholder text, clear selection, hide badge.
         if not candidates:
             self._selected_models.pop(tag, None)
             if not rows_container.query(".no-models-msg"):
@@ -1039,27 +1017,21 @@ class SimApp(App):
                 rows_container.mount(Static("No available models for now.",
                                             classes="no-models-msg"))
             section.set_has_selection(False)
+            if self.peer is not None:
+                self.peer.selected_models = dict(self._selected_models)
             return
 
-        # We have candidates → make sure the placeholder is gone.
         for msg in rows_container.query(".no-models-msg"):
             msg.remove()
 
-        # Drop a stale selection that no longer matches any candidate.
         valid_keys = {(pk, idx) for pk, idx, *_ in candidates}
         if self._selected_models.get(tag) not in valid_keys:
             self._selected_models.pop(tag, None)
-
-        # If nothing is selected, apply default-pick rules.
-        if tag not in self._selected_models:
             default = self._pick_default_selection(candidates)
             if default is not None:
                 self._selected_models[tag] = default
                 self._selection_memory[tag] = default
-                if self.peer is not None:
-                    self.peer.selected_models = dict(self._selected_models)
 
-        # Diff/mount rows.
         existing = [(r._peer_pk, r._model_idx) for r in rows_container.query(ModelRow)]
         new_keys = [(pk, idx) for pk, idx, *_ in candidates]
         selected = self._selected_models.get(tag)
@@ -1073,13 +1045,15 @@ class SimApp(App):
                     ModelRow(tag, pk, idx, name, node, params, active=is_active)
                 )
         else:
-            # Children already composed — safe to flip glyphs via set_active.
             for row in rows_container.query(ModelRow):
                 row.set_active(selected is not None and
                             (row._peer_pk, row._model_idx) == selected)
 
         section.set_has_selection(selected is not None)
-    
+
+        if self.peer is not None:
+            self.peer.selected_models = dict(self._selected_models)
+
     def on_model_row_selected(self, event: ModelRow.Selected):
         self._selected_models[event.tag] = (event.peer_pk, event.model_idx)
         self._selection_memory[event.tag] = (event.peer_pk, event.model_idx)   # ← remember
@@ -1110,3 +1084,42 @@ class SimApp(App):
 
         pk, idx, *_ = random.choice(candidates)
         return (pk, idx)
+
+    def _gather_candidates_for_tag(
+    self, tag: str
+) -> list[tuple[str, int, str, str, int]]:
+        """Collect (peer_pk, idx, display_name, node_label, params) candidates.
+        Pure data — no UI access, safe to call synchronously."""
+        if self.peer is None:
+            return []
+
+        def shorten(s: str, n: int) -> str:
+            return s if len(s) <= n else s[:n-3] + "..."
+
+        candidates: list[tuple[str, int, str, str, int]] = []
+
+        # Local
+        for i, m_info in enumerate(self.peer.models_info):
+            if tag not in (m_info.get("tags") or []):
+                continue
+            name = m_info.get("hf_name") or (m_info.get("path") or "unknown").rsplit("/", 1)[-1]
+            candidates.append((
+                self.peer.public_key, i, name,
+                shorten(self.peer.node_name, 7) + " (self)",
+                m_info.get("size", 0),
+            ))
+
+        # Remote
+        for pk, info in self.peer.known_public_keys.items():
+            node = info.get("peer_name") or f"Node {info.get('peer_id', '?')}"
+            for i, mi in enumerate(info.get("models_info") or []):
+                if tag not in (mi.get("tags") or []):
+                    continue
+                candidates.append((
+                    pk, i,
+                    mi.get("name") or mi.get("type", "?"),
+                    shorten(node, 14),
+                    mi.get("size", 0),
+                ))
+
+        return candidates

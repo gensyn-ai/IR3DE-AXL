@@ -65,11 +65,16 @@ class Peer:
         self.local_b = {}
         for stats_info, stats in zip(self.stats_info, self.stats):
             identifier = (stats_info['tokenizer_name'], stats_info['embedder_name'])
-            self.local_A[identifier] = {}
-            self.local_b[identifier] = {}
+            if identifier not in self.local_A:
+                self.local_A[identifier] = {}
+                self.local_b[identifier] = {}
             for tag, A, b in zip(stats['tags'], stats['A'], stats['b']):
-                self.local_A[identifier][tag] = A
-                self.local_b[identifier][tag] = b
+                if tag in self.local_A[identifier]:
+                    self.local_A[identifier][tag] = self.local_A[identifier][tag] + A
+                    self.local_b[identifier][tag] = self.local_b[identifier][tag] + b
+                else:
+                    self.local_A[identifier][tag] = A
+                    self.local_b[identifier][tag] = b
 
         self.chunks = {}
 
@@ -665,24 +670,36 @@ class Peer:
                     for stats, stats_info in zip(self.known_public_keys[pk]["stats"], self.known_public_keys[pk]["stats_info"]):
                         if stats_info['tokenizer_name'] == self.default_tokenizer_name and stats_info['embedder_name'] == self.default_embedder_name:
                             for tag, A_peer, b_peer in zip(stats['tags'], stats['A'], stats['b']):
-                                if tag in known_tags:
+                                if tag not in known_tags:
+                                    log(f"Received stats with unknown tag '{tag}' from peer {pk[:8]}... New tag found!", self.peer_id, msg_type="warning")
+                                    self.known_tags.append(tag)
+                                if tag in self.selected_tags:
                                     A_peer = A_peer.to(self.device)
                                     b_peer = b_peer.to(self.device)
                                     A += A_peer
                                     if tag not in b_dict:
                                         b_dict[tag] = b_peer
                                     else:
-                                        b_dict[tag] += b_peer
-                                else:
-                                    log(f"Received stats with unknown tag '{tag}' from peer {pk[:8]}... New tag found!", self.peer_id, msg_type="warning")
-                                    self.known_tags.append(tag)
+                                        b_dict[tag] += b_peer                                    
             
             for tag in self.local_A[identifier]:
-                A += self.local_A[identifier][tag].to(self.device)
-                if tag not in b_dict:
-                    b_dict[tag] = self.local_b[identifier][tag].to(self.device)
+                if tag in self.selected_tags:
+                    A += self.local_A[identifier][tag].to(self.device)
+                    if tag not in b_dict:
+                        b_dict[tag] = self.local_b[identifier][tag].to(self.device)
+                    else:
+                        b_dict[tag] += self.local_b[identifier][tag].to(self.device)
+
+            if not b_dict:
+                if not self.selected_tags:
+                    log("No expertise selected. Activate at least one in the Control Panel.",
+                        self.peer_id, msg_type="warning")
                 else:
-                    b_dict[tag] += self.local_b[identifier][tag].to(self.device)
+                    log(f"No stats available yet for the selected tags "
+                        f"{sorted(self.selected_tags)}. The local peer doesn't carry stats "
+                        f"for these tags and no peer has shared matching stats yet.",
+                        self.peer_id, msg_type="warning")
+                return None
 
             b = torch.zeros((emb_dim + 1, len(b_dict)), dtype=torch.float32, device=self.device)
             for i, tag in enumerate(b_dict):
@@ -726,45 +743,43 @@ class Peer:
         assigned_tag = tags[predicted_tags.view(batch_size, -1).mode(dim=1)[0]]
         return assigned_tag
 
-    def find_best_model(self, assigned_tag, user_input):
-        valid_peers = []
-        for pk in self.known_public_keys:
-            if "models_info" in self.known_public_keys[pk]:
-                for i, model_info in enumerate(self.known_public_keys[pk]["models_info"]):
-                    if assigned_tag in model_info.get("tags"):
-                        valid_peers.append((pk, i))  # using index to identify which model to use from that peer for now
-        for i, model_info in enumerate(self.models_info):
-            if assigned_tag in model_info.get("tags"):
-                valid_peers.append((None, i))  # None indicates local model
-        
-        local_models = [i for v, i in valid_peers if v is None]
-        if len(local_models) > 0:
-            log(f"Local model with tag '{assigned_tag}' found. Using the local model to process the input.", self.peer_id, msg_type="ir3de")
-            random.shuffle(local_models)
-            selected_model = (self.public_key, local_models[0])
-            if 'num_requests' not in self.models[selected_model[1]]:
-                self.models[selected_model[1]]['num_requests'] = 0
-            self.models[selected_model[1]]['num_requests'] += 1
-            return selected_model
 
-        if len(valid_peers) == 0:
-            log(f"No known peers with models matching the assigned tag '{assigned_tag}' found. Handling user input with a random local model.", self.peer_id, msg_type="warning")
-            all_local_models_indices = list(range(len(self.models_info)))
-            random.shuffle(all_local_models_indices)
-            selected_model = (self.public_key, all_local_models_indices[0])
-            log(f"Selected local model {self.models_info[selected_model[1]]['path']} to handle the user input.", self.peer_id, msg_type="ir3de")
-            return selected_model
-        
-        random.shuffle(valid_peers)
-        selected_peer = valid_peers[0]
-        log(f"Selected peer {selected_peer[0][:8]}... with model index {selected_peer[1]} to handle the user input.", self.peer_id, msg_type="ir3de")
-        
-        if 'num_requests' not in self.known_public_keys[selected_peer[0]]["models_info"][selected_peer[1]]:
-            self.known_public_keys[selected_peer[0]]["models_info"][selected_peer[1]]['num_requests'] = 0
-        self.known_public_keys[selected_peer[0]]["models_info"][selected_peer[1]]['num_requests'] += 1
+    def find_best_model(self, assigned_tag):
+        selected = self.selected_models.get(assigned_tag)
+        if selected is None:
+            log(f"No model selected for tag '{assigned_tag}'. Skipping.",
+                self.peer_id, msg_type="warning")
+            return None
 
-        return selected_peer
+        peer_pk, model_idx = selected
+        is_local = (peer_pk == self.public_key)
 
+        # Validate the selection still points at a live model
+        if is_local:
+            if model_idx >= len(self.models):
+                log(f"Selected local model idx {model_idx} for tag '{assigned_tag}' is out of range. Skipping.", self.peer_id, msg_type="warning")
+                return None
+            target = self.models[model_idx]
+        else:
+            info = self.known_public_keys.get(peer_pk)
+            if info is None:
+                log(f"Selected peer {peer_pk[:8]}... for tag '{assigned_tag}' is no longer known. Skipping.", self.peer_id, msg_type="warning")
+                return None
+            models_info = info.get("models_info") or []
+            if model_idx >= len(models_info):
+                log(f"Selected remote model idx {model_idx} from peer {peer_pk[:8]}... for tag '{assigned_tag}' is out of range. Skipping.", self.peer_id, msg_type="warning")
+                return None
+            target = models_info[model_idx]
+
+        if is_local:
+            log(f"Using user-selected local model (idx {model_idx}) for tag '{assigned_tag}'.", self.peer_id, msg_type="ir3de")
+        else:
+            log(f"Using user-selected model (idx {model_idx}) from peer {peer_pk[:8]}... for tag '{assigned_tag}'.", self.peer_id, msg_type="ir3de")
+
+        # Bump num_requests on whichever side hosts the chosen model
+        target['num_requests'] = target.get('num_requests', 0) + 1
+
+        return (peer_pk, model_idx)
 
     def handle_user_input(self, user_input, timeout=60):
 
@@ -776,7 +791,7 @@ class Peer:
         assigned_tag = self.find_best_tag(*out, user_input)
         log(f"User input assigned to tag '{assigned_tag}'", self.peer_id, msg_type="ir3de")
 
-        selected_model = self.find_best_model(assigned_tag, user_input)
+        selected_model = self.find_best_model(assigned_tag)
         if selected_model is None:
             log(f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'.", self.peer_id, msg_type="warning")
             return
