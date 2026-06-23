@@ -47,6 +47,8 @@ class Peer:
         self.awaiting_acks = {}
 
         self.known_tags = []
+        self.selected_tags: set[str] = set()
+        self.selected_models: dict[str, tuple[str, int]] = {}
         self.models_info = metadata.get("models", [])
         self.models = self.get_models_info()
         self.stats_info = default_stats.get("stats", []) + metadata.get("stats", [])
@@ -538,7 +540,8 @@ class Peer:
                     "tags": model_info.get("tags"),
                     "tokenizer_name": model_info.get("tokenizer"),
                     "size": model_info.get("size"),
-                    "type": model_info.get("type")
+                    "type": model_info.get("type"),
+                    "name": model_info.get("hf_name") or os.path.basename(model_info.get("path", "unknown")),
                 })
             for stats in self.stats_info:
                 info_msg["stats_info"].append({

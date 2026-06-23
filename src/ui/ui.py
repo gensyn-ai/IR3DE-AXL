@@ -1,3 +1,4 @@
+import random
 import threading
 
 from utils import format_params, set_log_widget, set_output_widget
@@ -8,7 +9,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual_plotext import PlotextPlot
 from rich.text import Text
-from utils import log, MSG_TYPE_COLORS, set_filter_predicate, ipv6_from_pubkey
+from utils import log, MSG_TYPE_COLORS, set_filter_predicate, ipv6_from_pubkey, symbol_for_tag
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -184,7 +185,110 @@ class FollowTailLog(RichLog):
             scroll_end=at_bottom,    # still always recomputed
             animate=animate,
         )
-    
+
+
+class TagButton(Static):
+
+    class Toggled(Message):
+        def __init__(self, tag: str, active: bool):
+            super().__init__()
+            self.tag = tag
+            self.active = active
+
+    def __init__(self, tag: str, symbol: str = "◆", **kwargs):
+        super().__init__(**kwargs)
+        self.tag = tag
+        self.symbol = symbol
+        self.active = False
+        self._refresh_label()
+
+    def _refresh_label(self):
+        check = "✓" if self.active else " "
+        # Pad symbol to 3 cells so glyphs like "</>" and "λ" line up the same.
+        sym = self.symbol.ljust(3)
+        self.update(Text(f" {sym} {self.tag.capitalize():<12} [{check}]"))
+        if self.active:
+            self.add_class("-active")
+        else:
+            self.remove_class("-active")
+
+    def on_click(self, event):
+        self.active = not self.active
+        self._refresh_label()
+        self.post_message(self.Toggled(self.tag, self.active))
+
+
+class ModelRow(Horizontal):
+    """One selectable model row inside an ExpertiseSection."""
+
+    class Selected(Message):
+        def __init__(self, tag: str, peer_pk: str, model_idx: int):
+            super().__init__()
+            self.tag = tag
+            self.peer_pk = peer_pk
+            self.model_idx = model_idx
+
+    def __init__(self, tag: str, peer_pk: str, model_idx: int,
+                 name: str, node_name: str, params: int,
+                 active: bool = False, **kwargs):
+        # Inject "-active" into the classes arg so the CSS engine sees it
+        # from the very first render — no on_mount timing dance.
+        classes_arg = kwargs.pop("classes", "")
+        if active:
+            classes_arg = f"{classes_arg} -active".strip()
+        if classes_arg:
+            kwargs["classes"] = classes_arg
+        super().__init__(**kwargs)
+
+        self._tag = tag
+        self._peer_pk = peer_pk
+        self._model_idx = model_idx
+        self._name = name
+        self._node_name = node_name
+        self._params = params
+        self._active = active
+
+    def compose(self) -> ComposeResult:
+        yield Static("●" if self._active else "○", classes="model-row-glyph")
+        yield Static(self._name, classes="model-row-name")
+        yield Static(self._node_name, classes="model-row-node")
+        yield Static(format_params(self._params), classes="model-row-params")
+
+    def set_active(self, active: bool):
+        if active == self._active:
+            return
+        self._active = active
+        if active:
+            self.add_class("-active")
+        else:
+            self.remove_class("-active")
+        self.query_one(".model-row-glyph", Static).update("●" if active else "○")
+
+    def on_click(self, event):
+        self.post_message(self.Selected(self._tag, self._peer_pk, self._model_idx))
+
+
+class ExpertiseSection(Vertical):
+    """A bordered card listing models for one selected expertise tag."""
+
+    def __init__(self, tag: str, symbol: str, **kwargs):
+        super().__init__(**kwargs)
+        self._tag = tag
+        self._symbol = symbol
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="expertise-section-header"):
+            yield Static(f"{self._symbol.ljust(3)} {self._tag.capitalize()}",
+                         classes="expertise-section-title")
+            yield Static("[SELECTED]", classes="expertise-section-badge")
+        yield Static(f"Select the desired model for {self._tag} tasks.",
+                     classes="expertise-section-desc")
+        yield Vertical(classes="expertise-section-rows")
+
+    def set_has_selection(self, has: bool):
+        badge = self.query_one(".expertise-section-badge", Static)
+        badge.styles.display = "block" if has else "none"
+
 
 class SimApp(App):
     CSS = read_css()
@@ -200,6 +304,9 @@ class SimApp(App):
         self._filters_enabled = False
         self._selected_peer_pubkey: str | None = None   # None until first refresh; defaults to self
         self._show_all_experts = False
+        self._selected_tags: set[str] = set()
+        self._selected_models: dict[str, tuple[str, int]] = {}   # tag -> (peer_pk, model_idx)
+        self._selection_memory: dict[str, tuple[str, int]] = {}   # survives deactivation
 
     def compose(self) -> ComposeResult:
 
@@ -249,6 +356,20 @@ class SimApp(App):
                                         yield Static("Experts per tag", id="tag-bars-title", classes="stats-table-title")
                                         yield ToggleChip("show all", id="show-all-chip")
                                     yield PlotextPlot(id="tag-bars")
+                    
+                    with TabPane("Control Panel", id="tab-control"):
+                        with VerticalScroll(id="control-scroll"):
+                            yield Static("Expertise Selection", id="expertise-title", classes="control-section-title")
+                            yield Static(
+                                "Choose one or more expertise domains. Selected expertise will determine available models.",
+                                id="expertise-desc",
+                                classes="control-section-desc",
+                            )
+                            yield Vertical(id="tag-buttons-container")
+                            yield Static("Model Selection (one per selected expertise)", id="model-selection-title",
+                                         classes="control-section-title")
+                            yield Vertical(id="expertise-sections")
+
             yield Static("", id="border-right")
         yield Static("", id="bottom-bar")
 
@@ -538,6 +659,8 @@ class SimApp(App):
         self._refresh_ir3de_stats_table()
         self._refresh_peers_table()
         self._refresh_tag_bars()
+        self._refresh_tag_buttons()
+        self._refresh_expertise_sections()
 
     def _refresh_models_table(self):
         if self.peer is None:
@@ -775,3 +898,215 @@ class SimApp(App):
             self._show_all_experts = event.active
             self._refresh_tag_bars()
     
+
+    def _refresh_tag_buttons(self):
+        if self.peer is None:
+            return
+
+        container = self.query_one("#tag-buttons-container", Vertical)
+        avail = container.size.width
+        if avail <= 0:
+            self.call_after_refresh(self._refresh_tag_buttons)
+            return
+
+        # Compare desired vs. current button set; rebuild only if they differ
+        desired = sorted(set(self.peer.known_tags))
+        current = [btn.tag for btn in container.query(TagButton)]
+        if desired == current:
+            return                          # no churn — preserves selection visuals
+
+        for child in list(container.children):
+            child.remove()
+
+        # Pack buttons into rows that fit horizontally
+        button_w = 24                       # must roughly match CSS width
+        margin   = 1
+        per_row  = max(1, avail // (button_w + margin))
+
+        row: list[TagButton] = []
+        rows: list[list[TagButton]] = []
+        for tag in desired:
+            sym = symbol_for_tag(tag)
+            btn = TagButton(tag, sym, id=f"tag-btn-{tag}")
+            if tag in self._selected_tags:
+                btn.active = True
+                btn._refresh_label()
+            row.append(btn)
+            if len(row) == per_row:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+
+        for r in rows:
+            h = Horizontal(classes="tag-button-row")
+            container.mount(h)
+            for btn in r:
+                h.mount(btn)
+    
+    def on_tag_button_toggled(self, event: TagButton.Toggled):
+
+        if event.active:
+            self._selected_tags.add(event.tag)
+        else:
+            self._selected_tags.discard(event.tag)
+
+        if self.peer is not None:
+            self.peer.selected_tags = set(self._selected_tags)
+
+        self._refresh_expertise_sections()
+
+    def _refresh_expertise_sections(self):
+        if self.peer is None:
+            return
+
+        container = self.query_one("#expertise-sections", Vertical)
+        current = {s._tag: s for s in container.query(ExpertiseSection)}
+        desired = sorted(self._selected_tags)
+
+        # Drop deactivated sections — remember current selection before discarding
+        for tag, section in list(current.items()):
+            if tag not in desired:
+                if tag in self._selected_models:
+                    self._selection_memory[tag] = self._selected_models[tag]
+                    del self._selected_models[tag]
+                section.remove()
+
+        # Add newly-activated sections — try to restore from memory
+        for tag in desired:
+            if tag not in current:
+                section = ExpertiseSection(tag, symbol_for_tag(tag))
+                container.mount(section)
+                if tag not in self._selected_models and tag in self._selection_memory:
+                    self._selected_models[tag] = self._selection_memory[tag]
+                self.call_after_refresh(lambda t=tag: self._populate_expertise_section(t))
+
+        # Repopulate already-visible sections (new models may have arrived)
+        for tag in desired:
+            if tag in current:
+                self._populate_expertise_section(tag)
+
+        if self.peer is not None:
+            self.peer.selected_models = dict(self._selected_models)
+
+
+    def _populate_expertise_section(self, tag: str):
+        if self.peer is None:
+            return
+
+        section = next(
+            (s for s in self.query(ExpertiseSection) if s._tag == tag), None
+        )
+        if section is None:
+            return
+        rows_container = section.query_one(".expertise-section-rows", Vertical)
+
+        def shorten(s: str, n: int) -> str:
+            return s if len(s) <= n else s[:n-3] + "..."
+
+        candidates: list[tuple[str, int, str, str, int]] = []
+
+        # Local
+        for i, m_info in enumerate(self.peer.models_info):
+            if tag not in (m_info.get("tags") or []):
+                continue
+            name = m_info.get("hf_name") or (m_info.get("path") or "unknown").rsplit("/", 1)[-1]
+            candidates.append((
+                self.peer.public_key, i, name,
+                shorten(self.peer.node_name, 7) + " (self)",
+                m_info.get("size", 0),
+            ))
+
+        # Remote
+        for pk, info in self.peer.known_public_keys.items():
+            node = info.get("peer_name") or f"Node {info.get('peer_id', '?')}"
+            for i, mi in enumerate(info.get("models_info") or []):
+                if tag not in (mi.get("tags") or []):
+                    continue
+                candidates.append((
+                    pk, i,
+                    mi.get("name") or mi.get("type", "?"),
+                    shorten(node, 14),
+                    mi.get("size", 0),
+                ))
+
+        # Empty case → placeholder text, clear selection, hide badge.
+        if not candidates:
+            self._selected_models.pop(tag, None)
+            if not rows_container.query(".no-models-msg"):
+                for child in list(rows_container.children):
+                    child.remove()
+                rows_container.mount(Static("No available models for now.",
+                                            classes="no-models-msg"))
+            section.set_has_selection(False)
+            return
+
+        # We have candidates → make sure the placeholder is gone.
+        for msg in rows_container.query(".no-models-msg"):
+            msg.remove()
+
+        # Drop a stale selection that no longer matches any candidate.
+        valid_keys = {(pk, idx) for pk, idx, *_ in candidates}
+        if self._selected_models.get(tag) not in valid_keys:
+            self._selected_models.pop(tag, None)
+
+        # If nothing is selected, apply default-pick rules.
+        if tag not in self._selected_models:
+            default = self._pick_default_selection(candidates)
+            if default is not None:
+                self._selected_models[tag] = default
+                self._selection_memory[tag] = default
+                if self.peer is not None:
+                    self.peer.selected_models = dict(self._selected_models)
+
+        # Diff/mount rows.
+        existing = [(r._peer_pk, r._model_idx) for r in rows_container.query(ModelRow)]
+        new_keys = [(pk, idx) for pk, idx, *_ in candidates]
+        selected = self._selected_models.get(tag)
+
+        if existing != new_keys:
+            for child in list(rows_container.children):
+                child.remove()
+            for pk, idx, name, node, params in candidates:
+                is_active = selected is not None and (pk, idx) == selected
+                rows_container.mount(
+                    ModelRow(tag, pk, idx, name, node, params, active=is_active)
+                )
+        else:
+            # Children already composed — safe to flip glyphs via set_active.
+            for row in rows_container.query(ModelRow):
+                row.set_active(selected is not None and
+                            (row._peer_pk, row._model_idx) == selected)
+
+        section.set_has_selection(selected is not None)
+    
+    def on_model_row_selected(self, event: ModelRow.Selected):
+        self._selected_models[event.tag] = (event.peer_pk, event.model_idx)
+        self._selection_memory[event.tag] = (event.peer_pk, event.model_idx)   # ← remember
+
+        for section in self.query(ExpertiseSection):
+            if section._tag != event.tag:
+                continue
+            for row in section.query(ModelRow):
+                row.set_active((row._peer_pk, row._model_idx) ==
+                            (event.peer_pk, event.model_idx))
+            section.set_has_selection(True)
+
+        if self.peer is not None:
+            self.peer.selected_models = dict(self._selected_models)
+
+    def _pick_default_selection(self, candidates: list[tuple[str, int, str, str, int]]) -> tuple[str, int] | None:
+        """Apply the user's default-selection rules to a candidate list."""
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            pk, idx, *_ = candidates[0]
+            return (pk, idx)
+
+        assert self.peer is not None
+        locals_only = [(pk, idx) for pk, idx, *_ in candidates if pk == self.peer.public_key]
+        if locals_only:
+            return random.choice(locals_only)
+
+        pk, idx, *_ = random.choice(candidates)
+        return (pk, idx)

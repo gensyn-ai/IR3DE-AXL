@@ -50,6 +50,26 @@ MSG_TYPE_COLORS = {
 }
  
 
+_TAG_SYMBOL_RULES: list[tuple[tuple[str, ...], str]] = [
+    (("cod", "program", "dev"),                        "</>"),
+    (("math", "arithmetic", "algebra", "calculus"),    "Σ"),
+    (("medic", "health", "medicine", "doctor"),        "✚"),
+    (("chat", "general", "conversation", "dialog"),    "⊟"),
+    (("history", "historical"),                        "◷"),
+    (("philosoph",),                                   "◐"),
+    (("physic",),                                      "⚛"),
+    (("biolog", "bio"),                                "❀"),
+    (("chem",),                                        "⚗"),
+    (("art", "draw", "design"),                        "✎"),
+    (("music", "audio", "sound"),                      "♪"),
+    (("lingu", "language", "writing", "literature"),   "❡"),
+    (("science",),                                     "⚛"),
+    (("geo", "earth"),                                 "◯"),
+    (("law", "legal"),                                 "§"),
+    (("finance", "money", "econ"),                     "$"),
+]
+
+
 def set_filter_predicate(fn):
     global _filter_predicate
     _filter_predicate = fn
@@ -361,3 +381,11 @@ def format_params(n: int) -> str:
     if n >= 1e6:  return f"{n / 1e6:.2f}M"
     if n >= 1e3:  return f"{n / 1e3:.2f}K"
     return str(n)
+
+
+def symbol_for_tag(tag: str) -> str:
+    t = tag.lower()
+    for keywords, symbol in _TAG_SYMBOL_RULES:
+        if any(kw in t for kw in keywords):
+            return symbol
+    return "◆"
