@@ -307,6 +307,9 @@ class SimApp(App):
         self._selected_tags: set[str] = set()
         self._selected_models: dict[str, tuple[str, int]] = {}   # tag -> (peer_pk, model_idx)
         self._selection_memory: dict[str, tuple[str, int]] = {}   # survives deactivation
+        self._tag_bars_last: tuple | None = None
+        self._peers_table_last_sig: tuple | None = None
+        self._section_sigs: dict[str, tuple] = {}
 
     def compose(self) -> ComposeResult:
 
@@ -474,6 +477,11 @@ class SimApp(App):
 
         # Pin self on top, sorted peers below
         all_rows = [self_row] + rows
+
+        sig = tuple(r[1] for r in all_rows) + (self._sort_column_key, self._sort_reverse, self._selected_peer_pubkey)
+        if getattr(self, "_peers_table_last_sig", None) == sig:
+            return
+        self._peers_table_last_sig = sig
 
         table.clear()
         selected_row_index = 0
@@ -676,16 +684,15 @@ class SimApp(App):
         title = self.query_one("#models-title", Static)
         title.update("Local models" if is_self else f"{self._selected_peer_name(pk)} models")
 
-        # Normalize both sources to the same (model_type, num_params, tags, num_requests) tuple
         if is_self:
             raw_models = [
                 (
-                    getattr(m["model"].config, "model_type", "unknown"),
-                    sum(p.numel() for p in m["model"].parameters()),
-                    m.get("tags", []) or [],
-                    m.get("num_requests", 0),
+                    mi.get("type", "unknown"),
+                    mi.get("size", 0),
+                    mi.get("tags", []) or [],
+                    self.peer.models[i].get("num_requests", 0),
                 )
-                for m in self.peer.models
+                for i, mi in enumerate(self.peer.models_info)
             ]
         else:
             info = self.peer.known_public_keys.get(pk, {})
@@ -867,6 +874,12 @@ class SimApp(App):
                 if tag in counts:
                     counts[tag] += 1
 
+        # Skip the redraw if the data is identical to the last tick.
+        signature = (self._show_all_experts, pk, tuple(counts.items()))
+        if signature == self._tag_bars_last:
+            return
+        self._tag_bars_last = signature
+
         plot = self.query_one("#tag-bars", PlotextPlot)
 
         num_bars = len(counts)
@@ -1008,6 +1021,10 @@ class SimApp(App):
         rows_container = section.query_one(".expertise-section-rows", Vertical)
 
         candidates = self._gather_candidates_for_tag(tag)
+        sig = tuple((pk, idx) for pk, idx, *_ in candidates), self._selected_models.get(tag)
+        if self._section_sigs.get(tag) == sig:
+            return
+        self._section_sigs[tag] = sig
 
         if not candidates:
             self._selected_models.pop(tag, None)
