@@ -21,4 +21,3 @@ logs/**
 !/ir3de_stats/default_stats.yml
 !/ir3de_stats/Meta-Llama-3-8B_gsm8k_mergebench.pth
 !/ir3de_stats/Meta-Llama-3-8B_humaneval_mergebench.pth
-test_**

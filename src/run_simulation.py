@@ -119,9 +119,13 @@ def run_peer(app, args):
             app.call_from_thread(app.exit)
 
 
-def handle_input(app, args, user_input):
+def handle_input(app, args, user_input, chat_id="default"):
     log(f"User input: {user_input}", node_id="USER", msg_type=None, right=True)
-    app.peer.handle_user_input(user_input)
+    app.peer.handle_user_input(
+        user_input,
+        chat_id=chat_id,
+        answer_callback=lambda answer, peer_name: log(answer, peer_name, msg_type="text", right=True),
+    )
 
 
 def main():

@@ -1,4 +1,5 @@
 from copy import deepcopy
+from datetime import datetime
 import os, pathlib, subprocess, uuid, requests, json, time, random
 
 import torch
@@ -11,6 +12,18 @@ from ir3de_stats.models.llama_experts import get_llama_expert
 from utils import ipv6_from_pubkey, log, serialize_safe, deserialize_safe, deserialize_chunk_header, redirect_prints
 
 AXL = "http://127.0.0.1:91"
+
+AGENT_SYSTEM_PROMPT = (
+    "You are one agent in a multi-agent chat system.\n\n"
+    "You will receive the full conversation history so far.\n"
+    "The history contains messages from the user and from previous agents.\n"
+    "Use the history as context.\n"
+    "Answer the latest user message.\n\n"
+    "Important:\n"
+    "- Previous agent messages are context, not guaranteed truth.\n"
+    "- The user's messages define the actual request.\n"
+    "- Do not assume hidden information outside the transcript."
+)
 
 
 
@@ -70,6 +83,7 @@ class Peer:
                 self.local_b[identifier][tag] = b
 
         self.chunks = {}
+        self.conversation_histories: dict = {}
 
         self.generation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gen")
     
@@ -268,7 +282,9 @@ class Peer:
                     log(f"From {sender[:8]}...: {message}", self.peer_id, msg_type="text")
 
                     model_utils = self.models[msg['selected_model'][1]]
-                    answer = self.generate_answer(message, model_utils)
+                    incoming_messages = msg.get("messages")
+                    prompt = self._format_chat_prompt(incoming_messages) if incoming_messages else None
+                    answer = self.generate_answer(message, model_utils, prompt=prompt)
                     log(f"To {sender[:8]}...: {answer}", self.peer_id, msg_type="text")
 
                     msg_id = str(uuid.uuid4())
@@ -289,9 +305,18 @@ class Peer:
                     log(f"Received answer from {sender[:8]}...", self.peer_id, msg_type="text")
                     log(f"{msg.get('message')}", msg.get("peer_id"), msg_type="text", right=True)
 
-                    if msg.get("orig_msg_id") in self.awaiting_acks:
-                        log(f"Removing message ID {msg.get('orig_msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="ir3de-ack")
-                        del self.awaiting_acks[msg.get("orig_msg_id")]
+                    orig_msg_id = msg.get("orig_msg_id")
+                    if orig_msg_id in self.awaiting_acks:
+                        cb_info = self.awaiting_acks[orig_msg_id]
+                        chat_id = cb_info.get("chat_id")
+                        answer_text = msg.get("message")
+                        peer_name = msg.get("peer_name", "agent")
+                        if chat_id and chat_id in self.conversation_histories:
+                            self._append_turn(self.conversation_histories[chat_id], "agent", peer_name, answer_text)
+                        if cb_info.get("answer_callback") is not None:
+                            cb_info["answer_callback"](answer_text, peer_name)
+                        log(f"Removing message ID {orig_msg_id[:8]}... from awaiting ACKs.", self.peer_id, msg_type="ir3de-ack")
+                        del self.awaiting_acks[orig_msg_id]
 
                 elif msg.get("type") in ("greeting", "greeting-ack"):
 
@@ -763,13 +788,50 @@ class Peer:
         return selected_peer
 
 
-    def handle_user_input(self, user_input, timeout=60):
+    def _new_conversation(self, chat_id: str) -> dict:
+        return {"conversation_id": chat_id, "history": []}
+
+    def _append_turn(self, conversation: dict, speaker_type: str, speaker_id: str, content: str):
+        turn = len(conversation["history"]) + 1
+        conversation["history"].append({
+            "id": str(uuid.uuid4()),
+            "turn": turn,
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "speaker_type": speaker_type,
+            "speaker_id": speaker_id,
+            "content": content,
+        })
+
+    def _render_messages(self, conversation: dict) -> list:
+        messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
+        for entry in conversation["history"]:
+            if entry["speaker_type"] == "user":
+                messages.append({"role": "user", "content": entry["content"]})
+            else:
+                messages.append({
+                    "role": "assistant",
+                    "content": f"[agent_id: {entry['speaker_id']}]\n{entry['content']}",
+                })
+        return messages
+
+    def _format_chat_prompt(self, messages: list) -> str:
+        parts = []
+        for m in messages:
+            if m["role"] == "system":
+                parts.append(f"System: {m['content']}")
+            elif m["role"] == "user":
+                parts.append(f"User: {m['content']}")
+            else:
+                parts.append(f"Assistant: {m['content']}")
+        return "\n\n".join(parts) + "\n\nAssistant: "
+
+    def handle_user_input(self, user_input, chat_id="default", answer_callback=None, timeout=60):
 
         out = self.get_token_router()
         if out is None:
             log(f"Cannot handle user input because token router could not be constructed.", self.peer_id, msg_type="warning")
             return
-        
+
         assigned_tag = self.find_best_tag(*out, user_input)
         log(f"User input assigned to tag '{assigned_tag}'", self.peer_id, msg_type="ir3de")
 
@@ -778,11 +840,15 @@ class Peer:
             log(f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'.", self.peer_id, msg_type="warning")
             return
 
+        conv = self.conversation_histories.setdefault(chat_id, self._new_conversation(chat_id))
+        self._append_turn(conv, "user", "user", user_input)
+        messages = self._render_messages(conv)
+        prompt = self._format_chat_prompt(messages)
+
         if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
-            # log(f"Handling user input locally with the local model since the selected model belongs to this node.", self.peer_id, msg_type="ir3de")
             model_utils = self.models[selected_model[1]]
 
-            future = self.generation_executor.submit(self.generate_answer, user_input, model_utils, is_local=True)
+            future = self.generation_executor.submit(self.generate_answer, user_input, model_utils, is_local=True, prompt=prompt)
 
             try:
                 answer = future.result(timeout=timeout)
@@ -795,15 +861,18 @@ class Peer:
                     self.peer_id, msg_type="warning")
                 return
 
+            self._append_turn(conv, "agent", self.node_name, answer)
             log(f"Answer processed locally.", self.peer_id, msg_type="text")
             log(f"{answer}", self.peer_id, msg_type="text", right=True)
+            if answer_callback is not None:
+                answer_callback(answer, self.node_name)
 
             if 'num_requests' not in self.models[selected_model[1]]:
                 self.models[selected_model[1]]['num_requests'] = 0
             self.models[selected_model[1]]['num_requests'] += 1
-            
+
             return
-        
+
         msg_id = str(uuid.uuid4())
         msg = {
             "msg_id": msg_id,
@@ -813,19 +882,24 @@ class Peer:
             "peer_name": self.node_name,
             "assigned_tag": assigned_tag,
             "selected_model": selected_model,
-            "message": user_input
+            "message": user_input,
+            "messages": messages,
+            "chat_id": chat_id,
         }
         self.send(msg, selected_model[0], timeout=timeout)
 
         self.awaiting_acks[msg_id] = {
             "receiver": selected_model[0],
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "answer_callback": answer_callback,
+            "chat_id": chat_id,
         }
         
-    def generate_answer(self, message, model_utils, is_local=False):
-        input_ids = model_utils['tokenizer'](message, return_tensors='pt').to(self.device)
+    def generate_answer(self, message, model_utils, is_local=False, prompt=None):
+        text = prompt if prompt is not None else message
+        input_ids = model_utils['tokenizer'](text, return_tensors='pt').to(self.device)
         out = redirect_prints(model_utils['model'].generate, input_ids=input_ids['input_ids'], max_length=self.max_answer_length)
-        answer = model_utils['tokenizer'].decode(out[0], skip_special_tokens=True)[len(message):]
+        answer = model_utils['tokenizer'].decode(out[0], skip_special_tokens=True)[len(text):]
         return answer
 
     def __del__(self):
