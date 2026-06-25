@@ -961,7 +961,6 @@ class SimApp(App):
         container = self.query_one("#tag-buttons-container", Vertical)
         avail = container.size.width
         if avail <= 0:
-            self.call_after_refresh(self._refresh_tag_buttons)
             return
 
         # Compare desired vs. current button set; rebuild only if they differ
