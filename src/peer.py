@@ -817,9 +817,8 @@ class Peer:
 
             out = self.get_token_router()
             if out is None:
-                msg = "Cannot handle user input because token router could not be constructed."
-                log(msg, self.peer_id, msg_type="warning")
-                log(msg, self.peer_id, msg_type="warning", right=True)
+                log("Cannot handle user input because token router could not be constructed.", self.peer_id, msg_type="warning")
+                log("Cannot handle user input. Please select at least one expertise in the Control Panel.", self.peer_id, msg_type="warning", right=True)
                 return
             
             assigned_tag = self.find_best_tag(*out, user_input)
