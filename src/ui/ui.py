@@ -11,7 +11,7 @@ from textual_plotext import PlotextPlot
 from rich.text import Text
 from utils import log, MSG_TYPE_COLORS, set_filter_predicate, ipv6_from_pubkey, symbol_for_tag
 
-from glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
+from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
