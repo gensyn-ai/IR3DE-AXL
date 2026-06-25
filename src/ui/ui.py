@@ -11,18 +11,12 @@ from textual_plotext import PlotextPlot
 from rich.text import Text
 from utils import log, MSG_TYPE_COLORS, set_filter_predicate, ipv6_from_pubkey, symbol_for_tag
 
+from glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
+
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from peer import Peer
 
-
-IR3DE_BANNER = (
-    " ▝▀▌▛▀  ▌▛▀▀▀▀▖ ▀▀▀▀▀▖ ▌▛▀▀▀▀▖ ▛▀▀▀▀▘\n"
-    "   ▌▌   ▌▌    ▌      ▌ ▌▌    ▌ ▌▌    \n"
-    "   ▌▌   ▌▛▀▀▀▚   ▀▀▀▚  ▌▌    ▌ ▛▀▀▀  \n"
-    "   ▌▌   ▌▌    ▌      ▌ ▌▌   ▗▌ ▌▌    \n"
-    " ▝▀▘▀▀  ▘▘    ▘ ▀▀▀▀▀  ▀▀▀▀▀▘  ▀▀▀▀▀▘"
-)
 
 def disable_input(app):
     def _disable():
@@ -41,6 +35,7 @@ def enable_input(app, node_id):
             input_widget.focus()
             app.query_one("#prompt", Static).styles.color = "#888888"
             app.query_one("#send-button", Static).disabled = False
+            app._hide_loading_msg()
         app.call_from_thread(_enable)
 
 
@@ -352,6 +347,10 @@ class SimApp(App):
         self._peers_table_last_sig: tuple | None = None
         self._section_sigs: dict[str, tuple] = {}
         self._sections: dict[str, ExpertiseSection] = {}
+        self._loading_dots: int = 0
+        self._loading_timer = None
+        self._control_spinner_frame: int = 0
+        self._control_spinner_timer = None
 
     def compose(self) -> ComposeResult:
 
@@ -368,6 +367,7 @@ class SimApp(App):
                 with TabbedContent(id="left-tabs"):
 
                     with TabPane("Control Panel", id="tab-control"):
+                        yield Static(DIAMOND_FRAMES[0], id="control-spinner")
                         with VerticalScroll(id="control-scroll"):
                             yield Static("Expertise Selection", id="expertise-title",
                                         classes="control-section-title")
@@ -420,6 +420,7 @@ class SimApp(App):
                 with TabbedContent(id="right-tabs"):
 
                     with TabPane("Chat", id="tab-chat"):
+                        yield Static("Loading local models", id="loading-msg")
                         yield RichLog(id="output", highlight=False, markup=False,
                                     auto_scroll=True, wrap=True)
                         yield Static("", id="input-divider")
@@ -490,6 +491,9 @@ class SimApp(App):
         stats_table.zebra_stripes = True
         self._stats_sort_column_key = self._col_stats_tok
         self._stats_sort_reverse = False
+
+        self._loading_timer = self.set_interval(0.5, self._tick_loading_msg)
+        self._control_spinner_timer = self.set_interval(0.1, self._tick_control_spinner)
 
     def _update_sort_arrows(self, table, columns, active_key, reverse):
         arrow = "▲" if reverse else "▼"
@@ -1144,3 +1148,44 @@ class SimApp(App):
                 ))
 
         return candidates
+
+    def _tick_loading_msg(self) -> None:
+        """Cycle the loading message between 0 and 3 trailing dots."""
+        self._loading_dots = (self._loading_dots + 1) % 4
+        try:
+            msg = self.query_one("#loading-msg", Static)
+            msg.update("Loading local models" + "." * self._loading_dots)
+        except Exception:
+            pass    # widget may not be mounted yet
+
+    def _hide_loading_msg(self) -> None:
+        # Chat tab loading line (existing)
+        if self._loading_timer is not None:
+            self._loading_timer.stop()
+            self._loading_timer = None
+        try:
+            msg = self.query_one("#loading-msg", Static)
+            msg.styles.display = "none"
+        except Exception:
+            pass
+
+        # Control Panel spinner → swap for the real content
+        if self._control_spinner_timer is not None:
+            self._control_spinner_timer.stop()
+            self._control_spinner_timer = None
+        try:
+            self.query_one("#control-spinner", Static).styles.display = "none"
+        except Exception:
+            pass
+        try:
+            self.query_one("#control-scroll").styles.display = "block"
+        except Exception:
+            pass
+
+    def _tick_control_spinner(self) -> None:
+        self._control_spinner_frame = (self._control_spinner_frame + 1) % len(DIAMOND_ROTATION)
+        try:
+            spinner = self.query_one("#control-spinner", Static)
+            spinner.update(DIAMOND_FRAMES[DIAMOND_ROTATION[self._control_spinner_frame]])
+        except Exception:
+            pass

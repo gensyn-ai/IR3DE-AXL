@@ -105,7 +105,7 @@ def log(message, node_id, msg_type=None, msg_id=None, right=False):
     if ACTIVATE_UI:
 
         msg_id_str = f" [{msg_id[:8]}]" if msg_id is not None else ""
-        node_prefix = f"[NODE {node_id}] " if node_id is not 'USER' else "[USER] "
+        node_prefix = f"[NODE {node_id}] " if node_id != 'USER' else "[USER] "
         time_prefix = f"[{current_time}] "
 
         line = Text()
