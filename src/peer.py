@@ -150,7 +150,7 @@ class Peer:
     def send(self, message, peer_public_key, timeout=5, large=False):
         try:
             if not large:
-                requests.post(
+                self.session.post(
                     f"{AXL}{self.peer_id:02d}/send",
                     headers={"X-Destination-Peer-Id": peer_public_key},
                     data=json.dumps(message),
@@ -165,7 +165,7 @@ class Peer:
                 chunks, chunks_msg_ids = serialize_safe(message, orig_msg_id, msg_id, msg_type, pk_from, pk_to)
                 for i, chunk in enumerate(chunks):
                     log(f"Sending chunk {i+1}/{len(chunks)} to {peer_public_key[:8]}...", self.peer_id, msg_type="stats")
-                    requests.post(
+                    self.session.post(
                         f"{AXL}{self.peer_id:02d}/send",
                         headers={"X-Destination-Peer-Id": peer_public_key},
                         data=chunk,
@@ -196,7 +196,7 @@ class Peer:
         
         while True:
             
-            resp = requests.get(f"{AXL}{self.peer_id:02d}/recv")
+            resp = self.session.get(f"{AXL}{self.peer_id:02d}/recv")
 
             if resp.status_code == 200 and len(resp.content) > 0 and not resp.content.startswith(b"{"):
                 
@@ -249,6 +249,7 @@ class Peer:
 
                 except Exception as e:
                     log(f"Failed to deserialize received message: {e}. Ignoring. Message content (truncated): {str(resp.content)[:100]}...", self.peer_id, msg_type="warning")
+                    time.sleep(0.5)
                     continue
             
             elif resp.status_code == 200:
@@ -256,17 +257,21 @@ class Peer:
                 sender = resp.headers.get("X-From-Peer-Id")
                 if sender is None:
                     log(f"Received message without sender information. Ignoring. Message content (truncated): {str(resp.text)[:100]}...", self.peer_id, msg_type="warning")
+                    time.sleep(0.5)
                     continue
                 if resp.text is None or resp.text == "":
                     log(f"Received empty message from {sender[:8]}.... Ignoring.", self.peer_id, msg_type="warning")
+                    time.sleep(0.5)
                     continue
                 try:
                     msg = json.loads(resp.text)
                 except json.JSONDecodeError:
                     log(f"Failed to decode JSON message from {sender[:8]}.... Ignoring. Message content (truncated): {str(resp.text)[:100]}...", self.peer_id, msg_type="warning")
+                    time.sleep(0.5)
                     continue
                 except Exception as e:
                     log(f"Unexpected error when decoding message from {sender[:8]}: {e}. Ignoring. Message content (truncated): {str(resp.text)[:100]}...", self.peer_id, msg_type="warning")
+                    time.sleep(0.5)
                     continue
                 
                 if msg.get("type") == "text":
@@ -419,7 +424,7 @@ class Peer:
                 else:
                     log(f"WARNING: Received unknown message type from {sender[:8]}, type={msg.get('type')}.", self.peer_id, msg_type="warning")
 
-            time.sleep(0.2)
+            time.sleep(0.5)
 
     def send_greetings(self, num_peers_to_greet=5, timeout=5):
         
@@ -782,19 +787,46 @@ class Peer:
         return (peer_pk, model_idx)
 
     def handle_user_input(self, user_input, timeout=60):
-
-        out = self.get_token_router()
-        if out is None:
-            log(f"Cannot handle user input because token router could not be constructed.", self.peer_id, msg_type="warning")
-            return
         
-        assigned_tag = self.find_best_tag(*out, user_input)
-        log(f"User input assigned to tag '{assigned_tag}'", self.peer_id, msg_type="ir3de")
+        unique_models = set(self.selected_models.values())
+        if len(unique_models) == 1:
+            selected_model = next(iter(unique_models))
+            log(f"Only one model is currently selected across all tags. "
+                f"Skipping token routing and dispatching directly to it.",
+                self.peer_id, msg_type="warning")
 
-        selected_model = self.find_best_model(assigned_tag)
-        if selected_model is None:
-            log(f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'.", self.peer_id, msg_type="warning")
-            return
+            # Mirror find_best_model's num_requests bump on the chosen target.
+            peer_pk, model_idx = selected_model
+            if peer_pk == self.public_key:
+                if model_idx < len(self.models):
+                    target = self.models[model_idx]
+                    target['num_requests'] = target.get('num_requests', 0) + 1
+            else:
+                info = self.known_public_keys.get(peer_pk)
+                if info is not None:
+                    models_info = info.get("models_info") or []
+                    if model_idx < len(models_info):
+                        target = models_info[model_idx]
+                        target['num_requests'] = target.get('num_requests', 0) + 1
+
+            # Pick an arbitrary tag to report in the outgoing message
+            # (the remote peer indexes by model_idx, not by tag).
+            assigned_tag = next(iter(self.selected_models.keys()), "(unrouted)")
+
+        else:
+
+            out = self.get_token_router()
+            if out is None:
+                log(f"Cannot handle user input because token router could not be constructed.", self.peer_id, msg_type="warning")
+                return
+            
+            assigned_tag = self.find_best_tag(*out, user_input)
+            log(f"User input assigned to tag '{assigned_tag}'", self.peer_id, msg_type="ir3de")
+
+            selected_model = self.find_best_model(assigned_tag)
+            if selected_model is None:
+                log(f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'.", self.peer_id, msg_type="warning")
+                return
 
         if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
             # log(f"Handling user input locally with the local model since the selected model belongs to this node.", self.peer_id, msg_type="ir3de")

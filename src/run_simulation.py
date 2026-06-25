@@ -46,6 +46,7 @@ def run_peer(app, args):
         if app is not None:
             app.peer = peer
             enable_filters(app)
+            enable_input(app, peer.peer_id)
     
         # Log the peer info now that the widget is available
         log(f"Peer {peer.peer_id} - Public Key: {peer.public_key[:8]}..., IPv6: {peer.ipv6_address}", peer.peer_id)
@@ -97,9 +98,6 @@ def run_peer(app, args):
                 last_shared_stats = current_time
                 never_shared_stats = False
                 time.sleep(1)
-            
-            if app is not None:
-                enable_input(app, peer.peer_id)
     
             time.sleep(0.1)
 

@@ -71,7 +71,7 @@ def read_css():
 
 
 class SubmittableTextArea(TextArea):
-
+    
     class Submitted(Message):
         def __init__(self, value: str):
             super().__init__()
@@ -271,10 +271,16 @@ class ModelRow(Horizontal):
 class ExpertiseSection(Vertical):
     """A bordered card listing models for one selected expertise tag."""
 
-    def __init__(self, tag: str, symbol: str, **kwargs):
+    def __init__(self, tag: str, symbol: str,
+                 candidates: list[tuple[str, int, str, str, int]],
+                 selected: tuple[str, int] | None,
+                 **kwargs):
         super().__init__(**kwargs)
         self._tag = tag
         self._symbol = symbol
+        self._candidates = candidates
+        self._selected = selected
+        self._rows_container = Vertical(classes="expertise-section-rows")
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="expertise-section-header"):
@@ -283,9 +289,44 @@ class ExpertiseSection(Vertical):
             yield Static("[SELECTED]", classes="expertise-section-badge")
         yield Static(f"Select the desired model for {self._tag} tasks.",
                      classes="expertise-section-desc")
-        yield Vertical(classes="expertise-section-rows")
+        yield self._rows_container
 
-    def set_has_selection(self, has: bool):
+    def on_mount(self) -> None:
+        # Rows are added here — at this point _rows_container is in the tree.
+        self._rebuild_rows()
+        self._update_badge()
+
+    def update_state(self,
+                     candidates: list[tuple[str, int, str, str, int]],
+                     selected: tuple[str, int] | None) -> None:
+        """Replace candidates/selection from outside (e.g. on the 2s tick)."""
+        self._candidates = candidates
+        self._selected = selected
+        self._rebuild_rows()
+        self._update_badge()
+
+    def _rebuild_rows(self) -> None:
+        for child in list(self._rows_container.children):
+            child.remove()
+
+        if not self._candidates:
+            self._rows_container.mount(
+                Static("No available models for now.", classes="no-models-msg")
+            )
+            return
+
+        for pk, idx, name, node, params in self._candidates:
+            is_active = self._selected is not None and (pk, idx) == self._selected
+            self._rows_container.mount(
+                ModelRow(self._tag, pk, idx, name, node, params, active=is_active)
+            )
+
+    def _update_badge(self) -> None:
+        badge = self.query_one(".expertise-section-badge", Static)
+        badge.styles.display = "block" if self._selected is not None else "none"
+
+    def set_has_selection(self, has: bool) -> None:
+        # Kept for backwards compatibility with callers that still use it.
         badge = self.query_one(".expertise-section-badge", Static)
         badge.styles.display = "block" if has else "none"
 
@@ -310,6 +351,7 @@ class SimApp(App):
         self._tag_bars_last: tuple | None = None
         self._peers_table_last_sig: tuple | None = None
         self._section_sigs: dict[str, tuple] = {}
+        self._sections: dict[str, ExpertiseSection] = {}
 
     def compose(self) -> ComposeResult:
 
@@ -974,99 +1016,48 @@ class SimApp(App):
             return
 
         container = self.query_one("#expertise-sections", Vertical)
-        current = {s._tag: s for s in container.query(ExpertiseSection)}
         desired = sorted(self._selected_tags)
 
-        for tag, section in list(current.items()):
+        # Drop deactivated sections — uses our own registry
+        for tag in list(self._sections.keys()):
             if tag not in desired:
                 if tag in self._selected_models:
                     self._selection_memory[tag] = self._selected_models[tag]
                     del self._selected_models[tag]
-                section.remove()
+                self._sections[tag].remove()
+                del self._sections[tag]
 
+        # For each desired tag, ensure a section exists and is up to date
         for tag in desired:
-            if tag not in current:
-                section = ExpertiseSection(tag, symbol_for_tag(tag))
+            # 1) Make sure _selected_models[tag] has a valid value
+            candidates = self._gather_candidates_for_tag(tag)
+            valid_keys = {(pk, idx) for pk, idx, *_ in candidates}
+
+            if tag not in self._selected_models:
+                if tag in self._selection_memory and self._selection_memory[tag] in valid_keys:
+                    self._selected_models[tag] = self._selection_memory[tag]
+                else:
+                    default = self._pick_default_selection(candidates)
+                    if default is not None:
+                        self._selected_models[tag] = default
+                        self._selection_memory[tag] = default
+            elif self._selected_models[tag] not in valid_keys:
+                default = self._pick_default_selection(candidates)
+                if default is not None:
+                    self._selected_models[tag] = default
+                    self._selection_memory[tag] = default
+                else:
+                    self._selected_models.pop(tag, None)
+
+            selected = self._selected_models.get(tag)
+
+            # 2) Mount the section or update the existing one
+            if tag not in self._sections:
+                section = ExpertiseSection(tag, symbol_for_tag(tag), candidates, selected)
                 container.mount(section)
-
-                if tag not in self._selected_models:
-                    if tag in self._selection_memory:
-                        self._selected_models[tag] = self._selection_memory[tag]
-                    else:
-                        candidates = self._gather_candidates_for_tag(tag)
-                        default = self._pick_default_selection(candidates)
-                        if default is not None:
-                            self._selected_models[tag] = default
-                            self._selection_memory[tag] = default
-
-                self.call_after_refresh(lambda t=tag: self._populate_expertise_section(t))
-
-        for tag in desired:
-            if tag in current:
-                self._populate_expertise_section(tag)
-
-        if self.peer is not None:
-            self.peer.selected_models = dict(self._selected_models)
-
-
-    def _populate_expertise_section(self, tag: str):
-        if self.peer is None:
-            return
-
-        section = next(
-            (s for s in self.query(ExpertiseSection) if s._tag == tag), None
-        )
-        if section is None:
-            return
-        rows_container = section.query_one(".expertise-section-rows", Vertical)
-
-        candidates = self._gather_candidates_for_tag(tag)
-        sig = tuple((pk, idx) for pk, idx, *_ in candidates), self._selected_models.get(tag)
-        if self._section_sigs.get(tag) == sig:
-            return
-        self._section_sigs[tag] = sig
-
-        if not candidates:
-            self._selected_models.pop(tag, None)
-            if not rows_container.query(".no-models-msg"):
-                for child in list(rows_container.children):
-                    child.remove()
-                rows_container.mount(Static("No available models for now.",
-                                            classes="no-models-msg"))
-            section.set_has_selection(False)
-            if self.peer is not None:
-                self.peer.selected_models = dict(self._selected_models)
-            return
-
-        for msg in rows_container.query(".no-models-msg"):
-            msg.remove()
-
-        valid_keys = {(pk, idx) for pk, idx, *_ in candidates}
-        if self._selected_models.get(tag) not in valid_keys:
-            self._selected_models.pop(tag, None)
-            default = self._pick_default_selection(candidates)
-            if default is not None:
-                self._selected_models[tag] = default
-                self._selection_memory[tag] = default
-
-        existing = [(r._peer_pk, r._model_idx) for r in rows_container.query(ModelRow)]
-        new_keys = [(pk, idx) for pk, idx, *_ in candidates]
-        selected = self._selected_models.get(tag)
-
-        if existing != new_keys:
-            for child in list(rows_container.children):
-                child.remove()
-            for pk, idx, name, node, params in candidates:
-                is_active = selected is not None and (pk, idx) == selected
-                rows_container.mount(
-                    ModelRow(tag, pk, idx, name, node, params, active=is_active)
-                )
-        else:
-            for row in rows_container.query(ModelRow):
-                row.set_active(selected is not None and
-                            (row._peer_pk, row._model_idx) == selected)
-
-        section.set_has_selection(selected is not None)
+                self._sections[tag] = section
+            else:
+                self._sections[tag].update_state(candidates, selected)
 
         if self.peer is not None:
             self.peer.selected_models = dict(self._selected_models)
