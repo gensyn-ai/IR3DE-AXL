@@ -257,6 +257,7 @@ FilterChip:hover, ActionChip:hover, ToggleChip:hover {
     scrollbar-color: #1c9800;
     scrollbar-color-hover: #11ff00;
     scrollbar-color-active: #126900;
+    display: none;
 }
 
 #control-scroll {
@@ -433,6 +434,13 @@ ModelRow.-active .model-row-name {
 }
 
 #control-spinner {
+    width: 100%;
+    height: 1fr;
+    content-align: center middle;
+    color: #fad7d1;
+}
+
+#stats-spinner {
     width: 100%;
     height: 1fr;
     content-align: center middle;

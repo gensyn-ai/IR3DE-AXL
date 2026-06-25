@@ -384,6 +384,7 @@ class SimApp(App):
                             yield Vertical(id="expertise-sections")
 
                     with TabPane("Statistics", id="tab-stats"):
+                        yield Static(DIAMOND_FRAMES[0], id="stats-spinner")
                         with VerticalScroll(id="stats-scroll"):
                             yield Static("Known Peers", id="peers-title",
                                         classes="stats-table-title")
@@ -1169,23 +1170,29 @@ class SimApp(App):
         except Exception:
             pass
 
-        # Control Panel spinner → swap for the real content
+        # Stop the shared spinner timer
         if self._control_spinner_timer is not None:
             self._control_spinner_timer.stop()
             self._control_spinner_timer = None
-        try:
-            self.query_one("#control-spinner", Static).styles.display = "none"
-        except Exception:
-            pass
-        try:
-            self.query_one("#control-scroll").styles.display = "block"
-        except Exception:
-            pass
+
+        for spinner_id, content_id in (
+            ("#control-spinner", "#control-scroll"),
+            ("#stats-spinner",   "#stats-scroll"),
+        ):
+            try:
+                self.query_one(spinner_id, Static).styles.display = "none"
+            except Exception:
+                pass
+            try:
+                self.query_one(content_id).styles.display = "block"
+            except Exception:
+                pass
 
     def _tick_control_spinner(self) -> None:
         self._control_spinner_frame = (self._control_spinner_frame + 1) % len(DIAMOND_ROTATION)
-        try:
-            spinner = self.query_one("#control-spinner", Static)
-            spinner.update(DIAMOND_FRAMES[DIAMOND_ROTATION[self._control_spinner_frame]])
-        except Exception:
-            pass
+        frame = DIAMOND_FRAMES[DIAMOND_ROTATION[self._control_spinner_frame]]
+        for spinner_id in ("#control-spinner", "#stats-spinner"):
+            try:
+                self.query_one(spinner_id, Static).update(frame)
+            except Exception:
+                pass
