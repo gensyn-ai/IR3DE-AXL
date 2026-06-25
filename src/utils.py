@@ -105,16 +105,22 @@ def log(message, node_id, msg_type=None, msg_id=None, right=False):
     if ACTIVATE_UI:
 
         msg_id_str = f" [{msg_id[:8]}]" if msg_id is not None else ""
-        prefix = f"[NODE {node_id}] [{current_time}] "
+        node_prefix = f"[NODE {node_id}] " if node_id is not 'USER' else "[USER] "
+        time_prefix = f"[{current_time}] "
 
         line = Text()
-        line.append(prefix, style="dim white")
+        if right:
+            line.append(node_prefix, style="bold dim white")
+        else:
+            line.append(node_prefix, style=f"dim white")
+        line.append(time_prefix, style="dim white")
 
         if msg_type is not None:
-            color = MSG_TYPE_COLORS.get(msg_type, "#ffffff")
-            line.append(f"[{msg_type.upper()}]", style=f"bold {color}")
-            line.append(msg_id_str, style="#ffffff")
-            line.append(f" {message}", style="#ffffff")
+            if not (msg_type.upper() == 'text' and right):  # Don't show [TEXT] for right pane messages
+                color = MSG_TYPE_COLORS.get(msg_type, "#ffffff")
+                line.append(f"[{msg_type.upper()}]", style=f"bold {color}")
+                line.append(msg_id_str, style="#ffffff")
+                line.append(f" {message}", style="#ffffff")
         else:
             line.append(msg_id_str, style="#ffffff")
             line.append(message, style="#ffffff")

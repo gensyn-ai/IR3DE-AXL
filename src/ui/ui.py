@@ -362,20 +362,64 @@ class SimApp(App):
         with Horizontal():
 
             yield Static("", id="border-left")
+
+            # ───── LEFT PANE: Control Panel / Statistics / Logs ─────
             with Vertical(id="left-pane"):
-                with Horizontal(id="logs-header"):
-                    yield Static("═══ Logs ═══", id="logs-label")
-                    yield Static("filters ▾", id="filter-toggle")
-                yield Vertical(id="filter-drawer")        # empty; populated dynamically
-                yield FollowTailLog(id="logs", highlight=False, markup=False,
-                                    auto_scroll=False, wrap=True)
-                
+                with TabbedContent(id="left-tabs"):
+
+                    with TabPane("Control Panel", id="tab-control"):
+                        with VerticalScroll(id="control-scroll"):
+                            yield Static("Expertise Selection", id="expertise-title",
+                                        classes="control-section-title")
+                            yield Static(
+                                "Choose one or more expertise domains. Selected expertise "
+                                "will determine available models.",
+                                id="expertise-desc",
+                                classes="control-section-desc",
+                            )
+                            yield Vertical(id="tag-buttons-container")
+                            yield Static("Model Selection (one per selected expertise)",
+                                        id="model-selection-title",
+                                        classes="control-section-title")
+                            yield Vertical(id="expertise-sections")
+
+                    with TabPane("Statistics", id="tab-stats"):
+                        with VerticalScroll(id="stats-scroll"):
+                            yield Static("Known Peers", id="peers-title",
+                                        classes="stats-table-title")
+                            yield DataTable(id="peers-table")
+                            with Horizontal(id="stats-tables-row"):
+                                with Vertical(classes="stats-table-container"):
+                                    yield Static("Local models", id="models-title",
+                                                classes="stats-table-title")
+                                    yield DataTable(id="models-table")
+                                with Vertical(classes="stats-table-container"):
+                                    yield Static("Local IR3DE stats", id="stats-title",
+                                                classes="stats-table-title")
+                                    yield DataTable(id="ir3de-stats-table")
+                            with Horizontal(id="plots-row"):
+                                with Vertical(classes="plot-pane"):
+                                    with Horizontal(id="tag-bars-header"):
+                                        yield Static("Experts per tag", id="tag-bars-title",
+                                                    classes="stats-table-title")
+                                        yield ToggleChip("show all", id="show-all-chip")
+                                    yield PlotextPlot(id="tag-bars")
+
+                    with TabPane("Logs", id="tab-logs"):
+                        with Horizontal(id="logs-header"):
+                            yield Static("═══ Logs ═══", id="logs-label")
+                            yield Static("filters ▾", id="filter-toggle")
+                        yield Vertical(id="filter-drawer")        # empty; populated dynamically
+                        yield FollowTailLog(id="logs", highlight=False, markup=False,
+                                            auto_scroll=False, wrap=True)
+
             yield Static("", id="divider")
 
+            # ───── RIGHT PANE: Chat (single tab) ─────
             with Vertical(id="right-pane"):
                 with TabbedContent(id="right-tabs"):
-                    
-                    with TabPane("Input", id="tab-input"):
+
+                    with TabPane("Chat", id="tab-chat"):
                         yield RichLog(id="output", highlight=False, markup=False,
                                     auto_scroll=True, wrap=True)
                         yield Static("", id="input-divider")
@@ -383,39 +427,9 @@ class SimApp(App):
                             yield Static("> ", id="prompt")
                             yield SubmittableTextArea(id="user-input")
                             yield Static("[SEND]", id="send-button", markup=False)
-                    
-                    with TabPane("Statistics", id="tab-stats"):
-                        with VerticalScroll(id="stats-scroll"):
-                            yield Static("Known Peers", id="peers-title", classes="stats-table-title")
-                            yield DataTable(id="peers-table")
-                            with Horizontal(id="stats-tables-row"):
-                                with Vertical(classes="stats-table-container"):
-                                    yield Static("Local models", id="models-title", classes="stats-table-title")
-                                    yield DataTable(id="models-table")
-                                with Vertical(classes="stats-table-container"):
-                                    yield Static("Local IR3DE stats", id="stats-title", classes="stats-table-title")
-                                    yield DataTable(id="ir3de-stats-table")
-                            with Horizontal(id="plots-row"):
-                                with Vertical(classes="plot-pane"):
-                                    with Horizontal(id="tag-bars-header"):
-                                        yield Static("Experts per tag", id="tag-bars-title", classes="stats-table-title")
-                                        yield ToggleChip("show all", id="show-all-chip")
-                                    yield PlotextPlot(id="tag-bars")
-                    
-                    with TabPane("Control Panel", id="tab-control"):
-                        with VerticalScroll(id="control-scroll"):
-                            yield Static("Expertise Selection", id="expertise-title", classes="control-section-title")
-                            yield Static(
-                                "Choose one or more expertise domains. Selected expertise will determine available models.",
-                                id="expertise-desc",
-                                classes="control-section-desc",
-                            )
-                            yield Vertical(id="tag-buttons-container")
-                            yield Static("Model Selection (one per selected expertise)", id="model-selection-title",
-                                         classes="control-section-title")
-                            yield Vertical(id="expertise-sections")
 
             yield Static("", id="border-right")
+
         yield Static("", id="bottom-bar")
 
     def on_mount(self):

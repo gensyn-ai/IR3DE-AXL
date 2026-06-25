@@ -422,7 +422,7 @@ class Peer:
                         del self.awaiting_acks[msg.get("msg_id")]
 
                 else:
-                    log(f"WARNING: Received unknown message type from {sender[:8]}, type={msg.get('type')}.", self.peer_id, msg_type="warning")
+                    log(f"Received unknown message type from {sender[:8]}, type={msg.get('type')}.", self.peer_id, msg_type="warning")
 
             time.sleep(0.5)
 
@@ -791,9 +791,9 @@ class Peer:
         unique_models = set(self.selected_models.values())
         if len(unique_models) == 1:
             selected_model = next(iter(unique_models))
-            log(f"Only one model is currently selected across all tags. "
-                f"Skipping token routing and dispatching directly to it.",
-                self.peer_id, msg_type="warning")
+            msg = "Only one model is currently selected across all tags. Skipping token routing and dispatching directly to it."
+            log(msg, self.peer_id, msg_type="warning")
+            log(msg, self.peer_id, msg_type="warning", right=True)
 
             # Mirror find_best_model's num_requests bump on the chosen target.
             peer_pk, model_idx = selected_model
@@ -817,7 +817,9 @@ class Peer:
 
             out = self.get_token_router()
             if out is None:
-                log(f"Cannot handle user input because token router could not be constructed.", self.peer_id, msg_type="warning")
+                msg = "Cannot handle user input because token router could not be constructed."
+                log(msg, self.peer_id, msg_type="warning")
+                log(msg, self.peer_id, msg_type="warning", right=True)
                 return
             
             assigned_tag = self.find_best_tag(*out, user_input)
@@ -825,7 +827,9 @@ class Peer:
 
             selected_model = self.find_best_model(assigned_tag)
             if selected_model is None:
-                log(f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'.", self.peer_id, msg_type="warning")
+                msg = f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'."
+                log(msg, self.peer_id, msg_type="warning")
+                log(msg, self.peer_id, msg_type="warning", right=True)
                 return
 
         if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
@@ -837,12 +841,14 @@ class Peer:
             try:
                 answer = future.result(timeout=timeout)
             except FuturesTimeoutError:
-                log(f"Generation timed out after {timeout}s.",
-                    self.peer_id, msg_type="warning")
+                msg = f"Generation timed out after {timeout}s."
+                log(msg, self.peer_id, msg_type="warning")
+                log(msg, self.peer_id, msg_type="warning", right=True)
                 return
             except Exception as e:
-                log(f"Generation failed: {e}",
-                    self.peer_id, msg_type="warning")
+                msg = f"Generation failed: {e}"
+                log(msg, self.peer_id, msg_type="warning")
+                log(msg, self.peer_id, msg_type="warning", right=True)
                 return
 
             log(f"Answer processed locally.", self.peer_id, msg_type="text")

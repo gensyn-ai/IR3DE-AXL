@@ -118,7 +118,7 @@ def run_peer(app, args):
 
 
 def handle_input(app, args, user_input):
-    log(f"User input: {user_input}", node_id="USER", msg_type=None, right=True)
+    log(f"{user_input}", node_id="USER", msg_type=None, right=True)
     app.peer.handle_user_input(user_input)
 
 
