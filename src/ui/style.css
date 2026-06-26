@@ -8,7 +8,7 @@ Horizontal {
     padding: 0 1;
 }
 
-#border-left, #border-right, #divider {
+#border-left, #border-right {
     width: 1;
     height: 100%;
     background: #ffffff;
@@ -488,4 +488,14 @@ LatencyMetricSelectScreen {
     height: auto;
     background: transparent;
     border: none;
+}
+
+#divider {
+    width: 1;
+    height: 100%;
+    background: #ffffff;
+}
+
+#divider:hover {
+    background: #237dfa;
 }
