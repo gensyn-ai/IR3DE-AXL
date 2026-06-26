@@ -1,13 +1,14 @@
-import random
-import threading
+import os
+import random, threading, statistics
 
-from utils import format_params, set_log_widget, set_output_widget
+from utils import format_params, format_mean_std, set_log_widget, set_output_widget
 
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable
+from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable, OptionList
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual_plotext import PlotextPlot
+from textual.screen import ModalScreen
 from rich.text import Text
 from utils import log, MSG_TYPE_COLORS, set_filter_predicate, ipv6_from_pubkey, symbol_for_tag
 
@@ -326,6 +327,32 @@ class ExpertiseSection(Vertical):
         badge.styles.display = "block" if has else "none"
 
 
+class LatencyMetricSelectScreen(ModalScreen[str]):
+    """Popup that returns one of: 'prompt' | 'total' | 'input'."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    OPTIONS = [
+        ("Prompt latency",        "prompt"),
+        ("Latency / total token", "total"),
+        ("Latency / input token", "input"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="latency-metric-dialog"):
+            yield Static("Choose latency metric", id="latency-metric-dialog-title")
+            yield OptionList(
+                *[label for label, _ in self.OPTIONS],
+                id="latency-metric-options",
+            )
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(self.OPTIONS[event.option_index][1])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class SimApp(App):
     CSS = read_css()
     BINDINGS = [("ctrl+c", "quit", "Quit")]
@@ -351,6 +378,9 @@ class SimApp(App):
         self._loading_timer = None
         self._control_spinner_frame: int = 0
         self._control_spinner_timer = None
+        self._show_all_latencies = False
+        self._latency_plot_last: tuple | None = None
+        self._latency_metric = "prompt"   # one of: 'prompt' | 'total' | 'input'
 
     def compose(self) -> ComposeResult:
 
@@ -406,6 +436,16 @@ class SimApp(App):
                                         yield ToggleChip("show all", id="show-all-chip")
                                     yield PlotextPlot(id="tag-bars")
 
+                                with Vertical(classes="plot-pane"):
+                                    with Horizontal(id="latency-plot-header"):
+                                        yield Static("Latency vs parameters", id="latency-plot-title",
+                                                    classes="stats-table-title")
+                                        yield ToggleChip("show all", id="show-all-latency-chip")
+                                    yield Static("[ Prompt latency ▾ ]",
+                                                id="latency-metric-button",
+                                                classes="metric-button")
+                                    yield PlotextPlot(id="latency-plot")
+
                     with TabPane("Logs", id="tab-logs"):
                         with Horizontal(id="logs-header"):
                             yield Static("═══ Logs ═══", id="logs-label")
@@ -458,9 +498,8 @@ class SimApp(App):
 
         # Statistics tab — peers table
         table = self.query_one("#peers-table", DataTable)
-
-        self._col_name, self._col_pubkey, self._col_ipv6 = table.add_columns(
-            "Name", "Public Key", "IPv6 address"
+        self._col_name, self._col_pubkey, self._col_ipv6, self._col_peer_comm_lat = table.add_columns(
+            "Name", "Public Key", "IPv6 address", "Comm latency"
         )
         self._sort_column_key = self._col_name
         self._sort_reverse = False                  # default: ascending
@@ -473,11 +512,15 @@ class SimApp(App):
 
         # Models table setup
         models_table = self.query_one("#models-table", DataTable)
-        self._col_models_type, self._col_models_params, self._col_models_tags, self._col_models_num_requests = models_table.add_columns(
+        self._col_models_type, self._col_models_params, self._col_models_tags, self._col_models_num_requests, \
+        self._col_models_prompt_lat, self._col_models_total_tok_lat, self._col_models_input_tok_lat = models_table.add_columns(
             "Model Type  ",
             "Parameters  ",
             "Expertise  ",
-            "Num requests  "
+            "Num requests  ",
+            "Prompt latency  ",
+            "Latency / total tok  ",
+            "Latency / input tok  ",
         )
         models_table.zebra_stripes = True
         self._models_sort_column_key = self._col_models_type
@@ -504,6 +547,7 @@ class SimApp(App):
             table.columns[col_key].label = Text(text)
         table.refresh()
 
+    
     def _refresh_peers_table(self):
         if self.peer is None:
             return
@@ -514,29 +558,43 @@ class SimApp(App):
         if self._selected_peer_pubkey is None:
             self._selected_peer_pubkey = self.peer.public_key
 
-        # Collect (pubkey, display tuple) pairs so we can use pk as the row key
-        rows: list[tuple[str, tuple[str, str, str]]] = []
+        rows: list[tuple[str, tuple[str, str, str, str]]] = []
+        comm_lat_by_pk: dict[str, float] = {self.peer.public_key: 0.0}
+
         self_row = (self.peer.public_key, (
             f"{self.peer.node_name} (self)",
             self.peer.public_key[:16] + "...",
             self.peer.ipv6_address,
+            "—",                                    # self has no comm latency
         ))
+
         for pk, info in self.peer.known_public_keys.items():
+            if pk == self.peer.public_key:
+                continue
             name = info.get("peer_name") or f"Node {info.get('peer_id', '?')}"
             try:
                 ipv6 = ipv6_from_pubkey(pk)
             except ValueError:
                 ipv6 = "<invalid>"
-            rows.append((pk, (name, pk[:16] + "...", ipv6)))
 
-        col_idx = {
-            self._col_name:   0,
-            self._col_pubkey: 1,
-            self._col_ipv6:   2,
-        }[self._sort_column_key]
-        rows.sort(key=lambda r: r[1][col_idx].lower(), reverse=self._sort_reverse)
+            comm_lats = info.get("comm_latencies", []) or []
+            comm_lat_by_pk[pk] = statistics.mean(comm_lats) if comm_lats else 0.0
+            comm_lat_str = format_mean_std(comm_lats, unit="ms", scale=1000.0, precision=1)
 
-        # Pin self on top, sorted peers below
+            rows.append((pk, (name, pk[:16] + "...", ipv6, comm_lat_str)))
+
+        if self._sort_column_key == self._col_peer_comm_lat:
+            rows.sort(key=lambda r: comm_lat_by_pk.get(r[0], 0.0),
+                    reverse=self._sort_reverse)
+        else:
+            col_idx = {
+                self._col_name: 0,
+                self._col_pubkey: 1,
+                self._col_ipv6: 2,
+            }[self._sort_column_key]
+            rows.sort(key=lambda r: r[1][col_idx].lower(),
+                    reverse=self._sort_reverse)
+
         all_rows = [self_row] + rows
 
         sig = tuple(r[1] for r in all_rows) + (self._sort_column_key, self._sort_reverse, self._selected_peer_pubkey)
@@ -553,7 +611,6 @@ class SimApp(App):
 
         self._update_header_labels()
 
-        # Move cursor to the currently-selected pk
         if 0 <= selected_row_index < table.row_count:
             table.move_cursor(row=selected_row_index)
 
@@ -646,6 +703,8 @@ class SimApp(App):
             if event.control.disabled:
                 return
             self.query_one("#user-input", SubmittableTextArea).submit()
+        elif event.control.id == "latency-metric-button":
+            self.push_screen(LatencyMetricSelectScreen(), self._on_latency_metric_chosen)
 
     def _toggle_drawer(self):
         drawer = self.query_one("#filter-drawer")
@@ -728,6 +787,7 @@ class SimApp(App):
         self._refresh_ir3de_stats_table()
         self._refresh_peers_table()
         self._refresh_tag_bars()
+        self._refresh_latency_plot()
         self._refresh_tag_buttons()
         self._refresh_expertise_sections()
 
@@ -752,38 +812,80 @@ class SimApp(App):
                     mi.get("size", 0),
                     mi.get("tags", []) or [],
                     self.peer.models[i].get("num_requests", 0),
+                    self.peer.models[i].get("latencies", []) or [],
                 )
                 for i, mi in enumerate(self.peer.models_info)
             ]
         else:
             info = self.peer.known_public_keys.get(pk, {})
+            model_lats = info.get("model_latencies", {}) or {}
             raw_models = [
                 (
                     mi.get("type", "unknown"),
                     mi.get("size", 0),
                     mi.get("tags", []) or [],
                     mi.get("num_requests", 0),
+                    model_lats.get(i, []) or [],
                 )
-                for mi in info.get("models_info", [])
+                for i, mi in enumerate(info.get("models_info", []))
             ]
 
+
         data = []
-        for model_type, num_params, tags, num_requests in raw_models:
+        for model_type, num_params, tags, num_requests, latencies in raw_models:
             tags_str = ", ".join(tags)
+
+            prompt_lats    = [e["prompt_latency"] for e in latencies
+                            if e.get("prompt_latency") is not None]
+            total_tok_lats = [e["latency_per_total_token"] for e in latencies
+                            if e.get("latency_per_total_token") is not None]
+            input_tok_lats = [e["latency_per_input_token"] for e in latencies
+                            if e.get("latency_per_input_token") is not None]
+
             data.append({
                 "raw": {
-                    self._col_models_type:         model_type.lower(),
-                    self._col_models_params:       num_params,
-                    self._col_models_tags:         tags_str.lower(),
-                    self._col_models_num_requests: num_requests,
+                    self._col_models_type:           model_type.lower(),
+                    self._col_models_params:         num_params,
+                    self._col_models_tags:           tags_str.lower(),
+                    self._col_models_num_requests:   num_requests,
+                    self._col_models_prompt_lat:
+                        statistics.mean(prompt_lats) if prompt_lats else 0.0,
+                    self._col_models_total_tok_lat:
+                        statistics.mean(total_tok_lats) if total_tok_lats else 0.0,
+                    self._col_models_input_tok_lat:
+                        statistics.mean(input_tok_lats) if input_tok_lats else 0.0,
                 },
                 "display": (
                     model_type,
                     format_params(num_params),
                     tags_str,
                     str(num_requests),
+                    format_mean_std(prompt_lats,    unit="s",  scale=1.0,    precision=2),
+                    format_mean_std(total_tok_lats, unit="ms", scale=1000.0, precision=1),
+                    format_mean_std(input_tok_lats, unit="ms", scale=1000.0, precision=1),
                 ),
             })
+
+        data.sort(key=lambda r: r["raw"][self._models_sort_column_key],
+                reverse=self._models_sort_reverse)
+
+        table.clear()
+        for r in data:
+            table.add_row(*r["display"])
+
+        columns = [
+            (self._col_models_type,          "Model Type"),
+            (self._col_models_params,        "Parameters"),
+            (self._col_models_tags,          "Expertise"),
+            (self._col_models_num_requests,  "Num requests"),
+            (self._col_models_prompt_lat,    "Prompt latency"),
+            (self._col_models_total_tok_lat, "Latency / total tok"),
+            (self._col_models_input_tok_lat, "Latency / input tok"),
+        ]
+
+        self._update_sort_arrows(table, columns,
+                                self._models_sort_column_key,
+                                self._models_sort_reverse)
 
         data.sort(key=lambda r: r["raw"][self._models_sort_column_key],
                 reverse=self._models_sort_reverse)
@@ -869,10 +971,10 @@ class SimApp(App):
         if not pk:
             return
         self._selected_peer_pubkey = pk
-        # Immediately refresh the dependent tables so the UI updates without waiting 2s
         self._refresh_models_table()
         self._refresh_ir3de_stats_table()
         self._refresh_tag_bars()
+        self._refresh_latency_plot()
     
     def _resolve_selected_pk(self) -> str | None:
         """Return the currently-selected pk, falling back to self if it disappears."""
@@ -971,6 +1073,9 @@ class SimApp(App):
         if event.chip_id == "show-all-chip":
             self._show_all_experts = event.active
             self._refresh_tag_bars()
+        elif event.chip_id == "show-all-latency-chip":
+            self._show_all_latencies = event.active
+            self._refresh_latency_plot()
     
 
     def _refresh_tag_buttons(self):
@@ -1196,3 +1301,120 @@ class SimApp(App):
                 self.query_one(spinner_id, Static).update(frame)
             except Exception:
                 pass
+
+    def _refresh_latency_plot(self):
+        if self.peer is None:
+            return
+
+        pk = self._resolve_selected_pk()
+        assert pk is not None
+        is_self = (pk == self.peer.public_key)
+
+        field_map = {
+            "prompt": ("prompt_latency",           "s",      1.0),
+            "total":  ("latency_per_total_token",  "ms/tok", 1000.0),
+            "input":  ("latency_per_input_token",  "ms/tok", 1000.0),
+        }
+        metric = getattr(self, "_latency_metric", "prompt")
+        field, unit, scale = field_map[metric]
+
+        metric_label = {
+            "prompt": f"prompt latency ({unit})",
+            "total":  f"latency / total tok ({unit})",
+            "input":  f"latency / input tok ({unit})",
+        }[metric]
+
+        title = self.query_one("#latency-plot-title", Static)
+        if self._show_all_latencies:
+            title.update("Latency (all models)")
+        else:
+            title.update(
+                "Latency (local models)" if is_self
+                else f"Latency ({self._selected_peer_name(pk)} models)"
+            )
+
+        points: list[tuple[int, float, str]] = []
+
+        def add_local():
+            assert self.peer is not None
+            for i, mi in enumerate(self.peer.models_info):
+                size = mi.get("size", 0) or 0
+                latencies = self.peer.models[i].get("latencies", []) or []
+                vals = [e[field] for e in latencies if e.get(field) is not None]
+                if not vals or size <= 0:
+                    continue
+                label = mi.get("hf_name") or os.path.basename(mi.get("path", "?"))
+                points.append((size, statistics.mean(vals) * scale, label))
+
+        def add_remote(info):
+            models_info_list = info.get("models_info") or []
+            model_lats = info.get("model_latencies", {}) or {}
+            for i, mi in enumerate(models_info_list):
+                size = mi.get("size", 0) or 0
+                latencies = model_lats.get(i, []) or []
+                vals = [e[field] for e in latencies if e.get(field) is not None]
+                if not vals or size <= 0:
+                    continue
+                label = mi.get("name") or mi.get("type", "?")
+                points.append((size, statistics.mean(vals) * scale, label))
+
+        if self._show_all_latencies:
+            add_local()
+            for ppk, info in self.peer.known_public_keys.items():
+                if ppk == self.peer.public_key:
+                    continue
+                add_remote(info)
+        elif is_self:
+            add_local()
+        else:
+            add_remote(self.peer.known_public_keys.get(pk, {}))
+
+        signature = (
+            self._show_all_latencies,
+            pk,
+            metric,
+            tuple((s, round(l, 4)) for s, l, _ in points),
+        )
+        if signature == self._latency_plot_last:
+            return
+        self._latency_plot_last = signature
+
+        plot = self.query_one("#latency-plot", PlotextPlot)
+        plot.styles.height = max(1, len(self.peer.known_tags) + 3)
+
+        # Match the left plot's height minus 1 row (the row we gave to the button).
+        tag_bars_plot = self.query_one("#tag-bars", PlotextPlot)
+        left_h = tag_bars_plot.styles.height
+        # styles.height is a Length object; coerce safely
+        try:
+            left_h_val = int(left_h.value)        # type: ignore[union-attr]
+        except Exception:
+            left_h_val = len(self.peer.known_tags) + 4
+        plot.styles.height = max(1, left_h_val - 1)
+
+        plot.plt.clear_data()
+        plot.plt.clear_figure()
+        plot.plt.theme("dark")
+
+        if points:
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            plot.plt.scatter(xs, ys, color="violet", marker="dot")
+
+        plot.plt.xlabel("# params")
+        plot.refresh()
+    
+    def _on_latency_metric_chosen(self, value: str | None) -> None:
+        if value is None:
+            return
+        self._latency_metric = value
+        labels = {
+            "prompt": "Prompt latency",
+            "total":  "Latency / total token",
+            "input":  "Latency / input token",
+        }
+        self.query_one("#latency-metric-button", Static).update(
+            f"[ {labels[value]} ▾ ]"
+        )
+        self._latency_plot_last = None    # force redraw with new metric
+        self._refresh_latency_plot()

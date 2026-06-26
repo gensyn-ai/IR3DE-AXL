@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 from ir3de_stats.models.llama_experts import get_llama_expert
-from utils import ipv6_from_pubkey, log, serialize_safe, deserialize_safe, deserialize_chunk_header, redirect_prints
+from utils import ipv6_from_pubkey, log, redirect_prints_safe, serialize_safe, deserialize_safe, deserialize_chunk_header
 
 AXL = "http://127.0.0.1:91"
 
@@ -100,7 +100,7 @@ class Peer:
                 model.to(self.device)
             elif "hf_name" in model_info:
                 log(f"Loading expert model from {model_info['hf_name']}", self.peer_id, msg_type=None)
-                model = redirect_prints(AutoModelForCausalLM.from_pretrained, model_info["hf_name"])
+                model = redirect_prints_safe(AutoModelForCausalLM.from_pretrained, model_info["hf_name"])
                 model.to(self.device)  # type: ignore
             else:
                 raise ValueError(f"Model info for node {self.peer_id} must contain either 'path' or 'hf_name'. Provided info: {model_info}. Check the metadata{self.peer_id:02d}.json file.")
@@ -280,7 +280,7 @@ class Peer:
                     log(f"From {sender[:8]}...: {message}", self.peer_id, msg_type="text")
 
                     model_utils = self.models[msg['selected_model'][1]]
-                    answer = self.generate_answer(message, model_utils)
+                    answer, num_input_tokens, num_output_tokens = self.generate_answer(message, model_utils)
                     log(f"To {sender[:8]}...: {answer}", self.peer_id, msg_type="text")
 
                     msg_id = str(uuid.uuid4())
@@ -293,6 +293,8 @@ class Peer:
                         "peer_name": self.node_name,
                         "message": answer,
                         "selected_model": msg.get("selected_model"),
+                        "num_input_tokens": num_input_tokens,
+                        "num_output_tokens": num_output_tokens
                     }
                     self.send(answer_msg, sender, timeout=timeout)
                 
@@ -301,10 +303,38 @@ class Peer:
                     log(f"Received answer from {sender[:8]}...", self.peer_id, msg_type="text")
                     log(f"{msg.get('message')}", msg.get("peer_id"), msg_type="text", right=True)
 
-                    if msg.get("orig_msg_id") in self.awaiting_acks:
-                        log(f"Removing message ID {msg.get('orig_msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="ir3de-ack")
-                        del self.awaiting_acks[msg.get("orig_msg_id")]
+                    orig = msg.get("orig_msg_id")
+                    pending = self.awaiting_acks.pop(orig, None) if orig else None
+                    if pending is not None:
+                        log(f"Removing message ID {orig[:8]}... from awaiting ACKs.", self.peer_id, msg_type="ir3de-ack")
 
+                        prompt_latency = time.time() - pending["timestamp"]
+                        num_input_tokens = int(msg.get("num_input_tokens"))
+                        num_output_tokens = int(msg.get("num_output_tokens"))
+                        num_total_tokens = num_input_tokens + num_output_tokens
+
+                        latency_per_total = prompt_latency / num_total_tokens
+                        latency_per_input = prompt_latency / num_input_tokens
+
+                        sel = msg.get("selected_model")
+                        model_idx = sel[1]
+                        info = self.known_public_keys[sender]
+                        latencies_dict = info.setdefault("model_latencies", {})
+                        entries = latencies_dict.setdefault(model_idx, [])
+                        entries.append({
+                            "prompt_latency": prompt_latency,
+                            "num_input_tokens": num_input_tokens,
+                            "num_output_tokens": num_output_tokens,
+                            "latency_per_total_token": latency_per_total,
+                            "latency_per_input_token": latency_per_input,
+                        })
+
+                        log(f"Prompt latency to peer {sender[:8]}... (model idx {model_idx}): {prompt_latency:.4f} s "
+                            f"[in={num_input_tokens} tok, out={num_output_tokens} tok]", self.peer_id, msg_type="text")
+                        log(f"Latency per total token: {latency_per_total*1000:.2f} ms/tok ({num_total_tokens} tokens total)",
+                            self.peer_id, msg_type="text")
+                        log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok", self.peer_id, msg_type="text")
+                
                 elif msg.get("type") in ("greeting", "greeting-ack"):
 
                     log(f"Received greeting from {sender[:8]}: {msg.get('message')}", self.peer_id, msg_type=msg.get("type"))
@@ -327,9 +357,14 @@ class Peer:
                         }
                         self.send(greetings, sender, timeout=timeout)
                     
-                    if msg.get("type") == "greeting-ack" and msg.get("msg_id") in self.awaiting_acks:
-                        log(f"Received ACK for greeting from Node {msg.get('peer_id')}. Removing from awaiting ACKs.", self.peer_id, msg_type="greeting-ack")
-                        del self.awaiting_acks[msg.get("msg_id")]
+                    if msg.get("type") == "greeting-ack":
+                        pending = self.awaiting_acks.pop(msg.get("msg_id"), None)
+                        if pending is not None:
+                            comm_latency = time.time() - pending["timestamp"]
+                            log(f"Received ACK for greeting from Node {msg.get('peer_id')}. Removing from awaiting ACKs.", self.peer_id, msg_type="greeting-ack")
+                            if sender in self.known_public_keys:
+                                self.known_public_keys[sender].setdefault("comm_latencies", []).append(comm_latency)
+                            log(f"Communication latency to peer {sender[:8]}... (Node {msg.get('peer_id')}): {comm_latency*1000:.2f} ms", self.peer_id, msg_type="greeting-ack")
 
                 elif msg.get("type") == "knowledge":
 
@@ -453,9 +488,6 @@ class Peer:
         greetings_sent = 0
         
         for pk in known_public_keys:
-            
-            if pk in self.known_public_keys:
-                continue
 
             greetings = {
                 "msg_id": str(uuid.uuid4()),
@@ -787,6 +819,8 @@ class Peer:
         return (peer_pk, model_idx)
 
     def handle_user_input(self, user_input, timeout=60):
+
+        start_time = time.time()
         
         unique_models = set(self.selected_models.values())
         if len(unique_models) == 1:
@@ -832,13 +866,12 @@ class Peer:
                 return
 
         if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
-            # log(f"Handling user input locally with the local model since the selected model belongs to this node.", self.peer_id, msg_type="ir3de")
             model_utils = self.models[selected_model[1]]
 
             future = self.generation_executor.submit(self.generate_answer, user_input, model_utils, is_local=True)
 
             try:
-                answer = future.result(timeout=timeout)
+                answer, num_input_tokens, num_output_tokens = future.result(timeout=timeout)
             except FuturesTimeoutError:
                 msg = f"Generation timed out after {timeout}s."
                 log(msg, self.peer_id, msg_type="warning")
@@ -853,10 +886,26 @@ class Peer:
             log(f"Answer processed locally.", self.peer_id, msg_type="text")
             log(f"{answer}", self.peer_id, msg_type="text", right=True)
 
-            if 'num_requests' not in self.models[selected_model[1]]:
-                self.models[selected_model[1]]['num_requests'] = 0
-            self.models[selected_model[1]]['num_requests'] += 1
-            
+            prompt_latency = time.time() - start_time
+            num_total_tokens = num_input_tokens + num_output_tokens
+            latency_per_total = prompt_latency / num_total_tokens
+            latency_per_input = prompt_latency / num_input_tokens
+
+            local_model = self.models[selected_model[1]]
+            local_model.setdefault('latencies', []).append({
+                "prompt_latency": prompt_latency,
+                "num_input_tokens": num_input_tokens,
+                "num_output_tokens": num_output_tokens,
+                "latency_per_total_token": latency_per_total,
+                "latency_per_input_token": latency_per_input,
+            })
+
+            log(f"Prompt latency (local model idx {selected_model[1]}): {prompt_latency:.4f} s "
+                f"[in={num_input_tokens} tok, out={num_output_tokens} tok]", self.peer_id, msg_type="text")
+            log(f"Latency per total token: {latency_per_total*1000:.2f} ms/tok ({num_total_tokens} tokens total)", 
+                self.peer_id, msg_type="text")
+            log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok", self.peer_id, msg_type="text")
+
             return
         
         msg_id = str(uuid.uuid4())
@@ -873,15 +922,19 @@ class Peer:
         self.send(msg, selected_model[0], timeout=timeout)
 
         self.awaiting_acks[msg_id] = {
+            "model_idx": selected_model[1],
             "receiver": selected_model[0],
             "timestamp": time.time()
         }
         
     def generate_answer(self, message, model_utils, is_local=False):
-        input_ids = model_utils['tokenizer'](message, return_tensors='pt').to(self.device)
-        out = redirect_prints(model_utils['model'].generate, input_ids=input_ids['input_ids'], max_length=self.max_answer_length)
+        encoding = model_utils['tokenizer'](message, return_tensors='pt').to(self.device)
+        input_ids = encoding['input_ids']
+        num_input_tokens = int(input_ids.shape[1])
+        out = redirect_prints_safe(model_utils['model'].generate, input_ids=input_ids, max_length=self.max_answer_length)
+        num_output_tokens = int(out.shape[1]) - num_input_tokens
         answer = model_utils['tokenizer'].decode(out[0], skip_special_tokens=True)[len(message):]
-        return answer
+        return answer, num_input_tokens, num_output_tokens
 
     def __del__(self):
        if getattr(self, "proc", None) and self.proc.poll() is None:

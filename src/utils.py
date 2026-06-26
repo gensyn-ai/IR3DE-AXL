@@ -1,4 +1,4 @@
-import ipaddress, time, io, struct, os, uuid, threading, json
+import ipaddress, time, io, struct, os, uuid, threading, json, contextlib, io, warnings, statistics
 
 import torch
 import numpy as np
@@ -367,21 +367,6 @@ def deserialize_chunk_header(packet):
     return header
 
 
-def redirect_prints(func, *args, **kwargs):
-    devnull = os.open(os.devnull, os.O_WRONLY)
-    saved_stdout = os.dup(1); saved_stderr = os.dup(2)
-    os.dup2(devnull, 1)
-    os.dup2(devnull, 2)
-    try:
-        out = func(*args, **kwargs)
-    finally:
-        os.dup2(saved_stdout, 1)
-        os.dup2(saved_stderr, 2)
-        for fd in (devnull, saved_stdout, saved_stderr):
-            os.close(fd)
-    return out
-
-
 def format_params(n: int) -> str:
     if n >= 1e9:  return f"{n / 1e9:.2f}B"
     if n >= 1e6:  return f"{n / 1e6:.2f}M"
@@ -395,3 +380,38 @@ def symbol_for_tag(tag: str) -> str:
         if any(kw in t for kw in keywords):
             return symbol
     return "◆"
+
+
+def redirect_prints_safe(func, *args, **kwargs):
+    """Run `func` with all noisy output suppressed, without freezing Textual.
+
+    - fd 2 (stderr) is redirected to /dev/null at the OS level, catching
+      C/C++ warnings from PyTorch/CUDA that bypass Python's `sys.stderr`.
+    - fd 1 (stdout) is LEFT ALONE, because Textual writes ANSI escape
+      sequences there and any redirect would freeze the UI.
+    - Python-level `print()` to stdout is captured into a discard buffer.
+    - Python `warnings.warn(...)` is silenced.
+    """
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    saved_stderr = os.dup(2)
+    os.dup2(devnull, 2)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), \
+             warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return func(*args, **kwargs)
+    finally:
+        os.dup2(saved_stderr, 2)
+        os.close(devnull)
+        os.close(saved_stderr)
+
+def format_mean_std(values, unit="s", scale=1.0, precision=2):
+    """Render a list of samples as 'mean ± std unit'. Empty → '—', single → 'value unit'."""
+    if not values:
+        return "—"
+    scaled = [v * scale for v in values]
+    if len(scaled) == 1:
+        return f"{scaled[0]:.{precision}f} {unit}"
+    m = statistics.mean(scaled)
+    s = statistics.stdev(scaled)
+    return f"{m:.{precision}f} ± {s:.{precision}f} {unit}"
