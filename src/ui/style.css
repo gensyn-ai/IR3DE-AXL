@@ -80,17 +80,10 @@ Horizontal {
     width: 100%;
 }
 
-#logs-label {
-    width: 1fr;
-    color: #237dfa;
-    text-style: bold;
-    content-align: left middle;
-}
-
 #filter-toggle {
     width: auto;
     color: #888888;
-    content-align: right middle;
+    content-align: left middle;
 }
 
 FilterChip:hover, ActionChip:hover {

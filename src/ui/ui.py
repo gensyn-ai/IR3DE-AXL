@@ -90,7 +90,8 @@ class SubmittableTextArea(TextArea):
 
 
 class ActionChip(Static):
-    """Non-toggleable chip that fires a one-shot action when clicked."""
+    """Non-toggleable chip that fires a one-shot action when clicked.
+    Renders bold when `active`, plain otherwise."""
 
     class Triggered(Message):
         def __init__(self, action: str):
@@ -101,7 +102,18 @@ class ActionChip(Static):
         super().__init__(**kwargs)
         self.action = action
         self.color = color
-        self.update(Text(f"[{action.upper()}]", style=f"bold {color}"))
+        self.active = False
+        self._refresh_label()
+
+    def _refresh_label(self):
+        style = f"bold {self.color}" if self.active else self.color
+        self.update(Text(f"[{self.action.upper()}]", style=style))
+
+    def set_active(self, active: bool):
+        if active == self.active:
+            return
+        self.active = active
+        self._refresh_label()
 
     def on_click(self, event):
         self.post_message(self.Triggered(self.action))
@@ -448,7 +460,6 @@ class SimApp(App):
 
                     with TabPane("Logs", id="tab-logs"):
                         with Horizontal(id="logs-header"):
-                            yield Static("═══ Logs ═══", id="logs-label")
                             yield Static("filters ▾", id="filter-toggle")
                         yield Vertical(id="filter-drawer")        # empty; populated dynamically
                         yield FollowTailLog(id="logs", highlight=False, markup=False,
@@ -655,6 +666,7 @@ class SimApp(App):
             self._active_filters.add(event.msg_type)
         else:
             self._active_filters.discard(event.msg_type)
+        self._refresh_chip_states()
         self._rerender_logs()
 
     def _rerender_logs(self):
@@ -754,6 +766,12 @@ class SimApp(App):
             for kind, name, color in row:
                 if kind == "action":
                     chip = ActionChip(name, color, id=f"action-{name}")
+                    all_filters = set(MSG_TYPE_COLORS.keys()) | {"no-tag"}
+                    if name == "all":
+                        chip.active = (self._active_filters == all_filters)
+                    elif name == "none":
+                        chip.active = (len(self._active_filters) == 0)
+                    chip._refresh_label()
                 else:  # "filter"
                     chip = FilterChip(name, color, id=f"chip-{name}")
                     if name not in self._active_filters:
@@ -773,12 +791,23 @@ class SimApp(App):
         self._rerender_logs()
 
     def _refresh_chip_states(self):
-        """Sync every FilterChip's visual state to current _active_filters."""
+        """Sync every FilterChip and ActionChip's visual state to current
+        _active_filters."""
+        all_filters = set(MSG_TYPE_COLORS.keys()) | {"no-tag"}
+        is_all  = self._active_filters == all_filters
+        is_none = len(self._active_filters) == 0
+
         for chip in self.query(FilterChip):
             should_be_active = chip.msg_type in self._active_filters
             if chip.active != should_be_active:
                 chip.active = should_be_active
                 chip._refresh_label()
+
+        for chip in self.query(ActionChip):
+            if chip.action == "all":
+                chip.set_active(is_all)
+            elif chip.action == "none":
+                chip.set_active(is_none)
     
     def _refresh_stats_tab(self):
         if self.peer is None:
