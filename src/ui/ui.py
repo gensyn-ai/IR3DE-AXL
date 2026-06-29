@@ -1,5 +1,4 @@
-import os
-import random, threading, statistics
+import os, random, threading, statistics
 
 from utils import format_params, format_mean_std, set_log_widget, set_output_widget
 
@@ -11,8 +10,8 @@ from textual_plotext import PlotextPlot
 from textual.screen import ModalScreen
 from textual.events import MouseDown, MouseUp, MouseMove
 from rich.text import Text
-from utils import log, MSG_TYPE_COLORS, set_filter_predicate, ipv6_from_pubkey, symbol_for_tag
 
+from utils import log, MSG_TYPE_COLORS, set_filter_predicate, ipv6_from_pubkey, symbol_for_tag
 from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
 
 from typing import TYPE_CHECKING
@@ -305,13 +304,24 @@ class ExpertiseSection(Vertical):
         self._rebuild_rows()
         self._update_badge()
 
-    def update_state(self,
-                     candidates: list[tuple[str, int, str, str, int]],
-                     selected: tuple[str, int] | None) -> None:
-        """Replace candidates/selection from outside (e.g. on the 2s tick)."""
+    def update_state(self, candidates: list[tuple[str, int, str, str, int]], selected: tuple[str, int] | None) -> None:
+        
+        candidates_changed = candidates != self._candidates
+        selected_changed = selected != self._selected
+
+        if not candidates_changed and not selected_changed:
+            return
+
         self._candidates = candidates
         self._selected = selected
-        self._rebuild_rows()
+
+        if candidates_changed:
+            self._rebuild_rows()
+        else:
+            for row in self._rows_container.query(ModelRow):
+                is_active = self._selected is not None and (row._peer_pk, row._model_idx) == self._selected
+                row.set_active(is_active)
+
         self._update_badge()
 
     def _rebuild_rows(self) -> None:
