@@ -750,9 +750,8 @@ class SimApp(App):
             self.input_handler(self, self.args, user_text)
 
     async def action_quit(self):
-        if self.peer is not None and self.peer.proc is not None:
-            self.peer.proc.terminate()
-            self.peer.proc.wait()
+        if self.peer is not None:
+            self.peer.stop_node()
         self.exit()
 
     def on_resize(self, event):
