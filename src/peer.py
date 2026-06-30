@@ -1,6 +1,5 @@
-import atexit
-from copy import deepcopy
 import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit
+from copy import deepcopy
 
 import torch
 import torch.nn.functional as F
@@ -113,7 +112,6 @@ class Peer:
                     self.local_b[identifier][tag] = b
 
         self.chunks = {}
-        self.conversation_histories: dict = {}
 
         self.generation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gen")
 
@@ -212,6 +210,7 @@ class Peer:
                         timeout=timeout
                     )
                     self.awaiting_acks[chunks_msg_ids[i]] = {
+                        "type": msg_type,
                         "receiver": pk_to,
                         "timestamp": time.time()
                     }
@@ -550,6 +549,7 @@ class Peer:
                 continue
 
             self.awaiting_acks[greetings["msg_id"]] = {
+                "type": "greeting",
                 "receiver": pk,
                 "timestamp": time.time()
             }
@@ -587,6 +587,7 @@ class Peer:
                 continue
 
             self.awaiting_acks[knowledge_msg["msg_id"]] = {
+                "type": "knowledge",
                 "receiver": pk,
                 "timestamp": time.time()
             }
@@ -653,6 +654,7 @@ class Peer:
                 continue
 
             self.awaiting_acks[info_msg["msg_id"]] = {
+                "type": "info",
                 "receiver": pk,
                 "timestamp": time.time()
             }
@@ -698,6 +700,7 @@ class Peer:
                 continue
 
             self.awaiting_acks[info_msg["msg_id"]] = {
+                "type": "stats-req",
                 "receiver": pk,
                 "timestamp": time.time()
             }
@@ -735,6 +738,7 @@ class Peer:
         
         log(f"Shared stats with {sender[:8]}... in response to stats request. msg_id = {msg_id}", self.peer_id, msg_type="stats", msg_id=msg_id)
         self.awaiting_acks[msg_id] = {
+            "type": "stats",
             "receiver": sender,
             "timestamp": time.time()
         }
