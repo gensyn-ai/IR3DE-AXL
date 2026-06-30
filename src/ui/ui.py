@@ -190,7 +190,7 @@ class FollowTailLog(RichLog):
             width=width,
             expand=expand,
             shrink=shrink,
-            scroll_end=at_bottom,    # still always recomputed
+            scroll_end=at_bottom,
             animate=animate,
         )
 
@@ -750,9 +750,11 @@ class SimApp(App):
             self.input_handler(self, self.args, user_text)
 
     async def action_quit(self):
-        if self.peer is not None and self.peer.proc is not None:
-            self.peer.proc.terminate()
-            self.peer.proc.wait()
+        if self.peer is not None:
+            self.peer._save_current_chat_safely()
+            if self.peer.proc is not None:
+                self.peer.proc.terminate()
+                self.peer.proc.wait()
         self.exit()
 
     def on_resize(self, event):

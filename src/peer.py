@@ -1,3 +1,4 @@
+import atexit
 from copy import deepcopy
 import os, pathlib, subprocess, uuid, requests, json, time, random
 
@@ -7,11 +8,44 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
+import chats
 from ir3de_stats.models.llama_experts import get_llama_expert
 from utils import ipv6_from_pubkey, log, redirect_prints_safe, serialize_safe, deserialize_safe, deserialize_chunk_header
 
-AXL = "http://127.0.0.1:91"
 
+AXL = "http://127.0.0.1:91"
+AGENT_SYSTEM_PROMPT = (
+    "You are one agent in a multi-agent chat system.\n\n"
+    "You will receive the full conversation history so far.\n"
+    "The history contains messages from the user and from previous agents.\n"
+    "Use the history as context.\n"
+    "Answer the latest user message.\n\n"
+    "Important:\n"
+    "- Previous agent messages are context, not guaranteed truth.\n"
+    "- The user's messages define the actual request.\n"
+    "- Do not assume hidden information outside the transcript."
+)
+
+
+def format_prompt_for_expert(chat: dict) -> str:
+    """Build the text prompt sent to the expert from the chat's sendable
+    history. Plain 'User:' / 'Agent:' role markers — model-agnostic. The
+    trailing 'Agent: ' primes the model to continue.
+
+    Note: we deliberately do *not* use tokenizer chat templates here because
+    different experts in the network use different tokenizers. Plain text
+    works on all of them; quality is marginally below template-formatted
+    chat but uniform across the network.
+    """
+    parts = [AGENT_SYSTEM_PROMPT, ""]
+    if chat.get("summary"):
+        parts.append("Summary of the chat: " + chat["summary"])
+        parts.append("")
+    for m in chats.history_for_expert(chat):
+        prefix = "User" if m["role"] == "user" else "Agent"
+        parts.append(f"{prefix}: {m['text']}")
+    parts.append("Agent: ")
+    return "\n".join(parts)
 
 
 class Peer:
@@ -79,6 +113,9 @@ class Peer:
         self.chunks = {}
 
         self.generation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gen")
+
+        self.current_chat = chats.new_chat()
+        atexit.register(self._save_current_chat_safely)
     
     def get_topology(self, session):
         resp = session.get(f"{AXL}{self.peer_id:02d}/topology", timeout=5)
@@ -334,6 +371,14 @@ class Peer:
                         log(f"Latency per total token: {latency_per_total*1000:.2f} ms/tok ({num_total_tokens} tokens total)",
                             self.peer_id, msg_type="text")
                         log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok", self.peer_id, msg_type="text")
+
+                        if sel is not None:
+                            chats.add_agent_message(
+                                self.current_chat, msg.get("message", ""),
+                                peer_pk=sel[0],
+                                model_idx=sel[1],
+                                tag=pending.get("tag"),
+                            )
                 
                 elif msg.get("type") in ("greeting", "greeting-ack"):
 
@@ -549,13 +594,21 @@ class Peer:
     def check_acks(self, timeout=30):
         current_time = time.time()
         expired_acks = [msg_id for msg_id, info in self.awaiting_acks.items() if current_time - info['timestamp'] > timeout]
+        
         for msg_id in expired_acks:
-            pk = self.awaiting_acks[msg_id]['receiver']
+
+            info = self.awaiting_acks[msg_id]
+            pk = info['receiver']
+            
             if pk in self.known_public_keys:
-                peer_id = self.known_public_keys[self.awaiting_acks[msg_id]['receiver']]['peer_id']
-                log(f"No ACK received from peer {pk[:8]}... with ID {peer_id} for message ID {msg_id[:8]}..., message type {self.awaiting_acks[msg_id].get('type', 'unknown')} after {timeout} seconds.", self.peer_id, msg_type="warning")
+                peer_id = self.known_public_keys[pk]['peer_id']
+                log(f"No ACK received from peer {pk[:8]}... with ID {peer_id} for message ID {msg_id[:8]}..., message type {info.get('type', 'unknown')} after {timeout} seconds.", self.peer_id, msg_type="warning")
             else:
-                log(f"No ACK received from peer {pk[:8]}... with unknown ID, for message ID {msg_id[:8]}..., message type {self.awaiting_acks[msg_id].get('type', 'unknown')} after {timeout} seconds.", self.peer_id, msg_type="warning")
+                log(f"No ACK received from peer {pk[:8]}... with unknown ID, for message ID {msg_id[:8]}..., message type {info.get('type', 'unknown')} after {timeout} seconds.", self.peer_id, msg_type="warning")
+            
+            if info.get('type') == 'text':
+                chats.mark_last_user_failed(self.current_chat)
+
             del self.awaiting_acks[msg_id]
 
     def share_stats_and_models_info(self, num_peers_to_share=5, timeout=5):
@@ -821,7 +874,7 @@ class Peer:
     def handle_user_input(self, user_input, timeout=60):
 
         start_time = time.time()
-        
+
         unique_models = set(self.selected_models.values())
         if len(unique_models) == 1:
             selected_model = next(iter(unique_models))
@@ -829,7 +882,6 @@ class Peer:
             log(msg, self.peer_id, msg_type="warning")
             log(msg, self.peer_id, msg_type="warning", right=True)
 
-            # Mirror find_best_model's num_requests bump on the chosen target.
             peer_pk, model_idx = selected_model
             if peer_pk == self.public_key:
                 if model_idx < len(self.models):
@@ -843,8 +895,6 @@ class Peer:
                         target = models_info[model_idx]
                         target['num_requests'] = target.get('num_requests', 0) + 1
 
-            # Pick an arbitrary tag to report in the outgoing message
-            # (the remote peer indexes by model_idx, not by tag).
             assigned_tag = next(iter(self.selected_models.keys()), "(unrouted)")
 
         else:
@@ -860,27 +910,33 @@ class Peer:
 
             selected_model = self.find_best_model(assigned_tag)
             if selected_model is None:
-                msg = f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'."
-                log(msg, self.peer_id, msg_type="warning")
-                log(msg, self.peer_id, msg_type="warning", right=True)
+                err = f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'."
+                log(err, self.peer_id, msg_type="warning")
+                log(err, self.peer_id, msg_type="warning", right=True)
                 return
 
-        if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
-            model_utils = self.models[selected_model[1]]
+        tag_for_msg = assigned_tag if assigned_tag and assigned_tag != "(unrouted)" else None
+        chats.add_user_message(self.current_chat, user_input)
+        prompt = format_prompt_for_expert(self.current_chat)
 
-            future = self.generation_executor.submit(self.generate_answer, user_input, model_utils, is_local=True)
+        if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
+
+            model_utils = self.models[selected_model[1]]
+            future = self.generation_executor.submit(self.generate_answer, prompt, model_utils, is_local=True)
 
             try:
                 answer, num_input_tokens, num_output_tokens = future.result(timeout=timeout)
             except FuturesTimeoutError:
-                msg = f"Generation timed out after {timeout}s."
-                log(msg, self.peer_id, msg_type="warning")
-                log(msg, self.peer_id, msg_type="warning", right=True)
+                err = f"Generation timed out after {timeout}s."
+                log(err, self.peer_id, msg_type="warning")
+                log(err, self.peer_id, msg_type="warning", right=True)
+                chats.mark_last_user_failed(self.current_chat)
                 return
             except Exception as e:
-                msg = f"Generation failed: {e}"
-                log(msg, self.peer_id, msg_type="warning")
-                log(msg, self.peer_id, msg_type="warning", right=True)
+                err = f"Generation failed: {e}"
+                log(err, self.peer_id, msg_type="warning")
+                log(err, self.peer_id, msg_type="warning", right=True)
+                chats.mark_last_user_failed(self.current_chat)
                 return
 
             log(f"Answer processed locally.", self.peer_id, msg_type="text")
@@ -893,47 +949,60 @@ class Peer:
 
             local_model = self.models[selected_model[1]]
             local_model.setdefault('latencies', []).append({
-                "prompt_latency": prompt_latency,
-                "num_input_tokens": num_input_tokens,
-                "num_output_tokens": num_output_tokens,
+                "prompt_latency":          prompt_latency,
+                "num_input_tokens":        num_input_tokens,
+                "num_output_tokens":       num_output_tokens,
                 "latency_per_total_token": latency_per_total,
                 "latency_per_input_token": latency_per_input,
             })
 
             log(f"Prompt latency (local model idx {selected_model[1]}): {prompt_latency:.4f} s "
-                f"[in={num_input_tokens} tok, out={num_output_tokens} tok]", self.peer_id, msg_type="text")
-            log(f"Latency per total token: {latency_per_total*1000:.2f} ms/tok ({num_total_tokens} tokens total)", 
+                f"[in={num_input_tokens} tok, out={num_output_tokens} tok]",
                 self.peer_id, msg_type="text")
-            log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok", self.peer_id, msg_type="text")
+            log(f"Latency per total token: {latency_per_total*1000:.2f} ms/tok "
+                f"({num_total_tokens} tokens total)", self.peer_id, msg_type="text")
+            log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok",
+                self.peer_id, msg_type="text")
+
+            chats.add_agent_message(
+                self.current_chat,
+                answer,
+                peer_pk=self.public_key,
+                model_idx=selected_model[1],
+                tag=tag_for_msg,
+            )
 
             return
-        
+
         msg_id = str(uuid.uuid4())
         msg = {
-            "msg_id": msg_id,
-            "type": "text",
-            "from": self.public_key,
-            "peer_id": self.peer_id,
-            "peer_name": self.node_name,
-            "assigned_tag": assigned_tag,
+            "msg_id":         msg_id,
+            "type":           "text",
+            "from":           self.public_key,
+            "peer_id":        self.peer_id,
+            "peer_name":      self.node_name,
+            "assigned_tag":   assigned_tag,
             "selected_model": selected_model,
-            "message": user_input
+            "message":        prompt,
         }
         self.send(msg, selected_model[0], timeout=timeout)
 
         self.awaiting_acks[msg_id] = {
-            "model_idx": selected_model[1],
-            "receiver": selected_model[0],
-            "timestamp": time.time()
+            "type":       "text",
+            "model_idx":  selected_model[1],
+            "receiver":   selected_model[0],
+            "tag":        tag_for_msg,
+            "timestamp":  time.time(),
         }
-        
+
     def generate_answer(self, message, model_utils, is_local=False):
         encoding = model_utils['tokenizer'](message, return_tensors='pt').to(self.device)
         input_ids = encoding['input_ids']
         num_input_tokens = int(input_ids.shape[1])
-        out = redirect_prints_safe(model_utils['model'].generate, input_ids=input_ids, max_length=self.max_answer_length)
-        num_output_tokens = int(out.shape[1]) - num_input_tokens
-        answer = model_utils['tokenizer'].decode(out[0], skip_special_tokens=True)[len(message):]
+        out = redirect_prints_safe(model_utils['model'].generate, input_ids=input_ids, max_new_tokens=self.max_answer_length)
+        new_tokens = out[0, num_input_tokens:]
+        answer = model_utils['tokenizer'].decode(new_tokens, skip_special_tokens=True)
+        num_output_tokens = int(new_tokens.shape[0])
         return answer, num_input_tokens, num_output_tokens
 
     def __del__(self):
@@ -943,3 +1012,11 @@ class Peer:
                self.proc.wait(timeout=3)
            except subprocess.TimeoutExpired:
                self.proc.kill()
+    
+    def _save_current_chat_safely(self) -> None:
+        """Persist the current chat on process exit. Swallows errors so we never
+        raise during interpreter shutdown."""
+        try:
+            chats.save_chat(self.current_chat)
+        except Exception:
+            pass
