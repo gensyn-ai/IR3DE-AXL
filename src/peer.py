@@ -1,4 +1,4 @@
-import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit
+import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit, threading
 from copy import deepcopy
 
 import torch
@@ -117,6 +117,8 @@ class Peer:
 
         self.current_chat = chats.new_chat()
         atexit.register(self._save_current_chat_safely)
+
+        self.chat_lock = threading.Lock()
     
     def get_topology(self, session):
         resp = session.get(f"{AXL}{self.peer_id:02d}/topology", timeout=5)
@@ -375,12 +377,13 @@ class Peer:
                         log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok", self.peer_id, msg_type="text")
 
                         if sel is not None:
-                            chats.add_agent_message(
-                                self.current_chat, msg.get("message", ""),
-                                peer_pk=sel[0],
-                                model_idx=sel[1],
-                                tag=pending.get("tag"),
-                            )
+                            with self.chat_lock:
+                                chats.add_agent_message(
+                                    self.current_chat, msg.get("message", ""),
+                                    peer_pk=sel[0],
+                                    model_idx=sel[1],
+                                    tag=pending.get("tag"),
+                                )
                 
                 elif msg.get("type") in ("greeting", "greeting-ack"):
 
@@ -918,8 +921,9 @@ class Peer:
                 return
 
         tag_for_msg = assigned_tag if assigned_tag and assigned_tag != "(unrouted)" else None
-        chats.add_user_message(self.current_chat, user_input)
-        prompt = format_prompt_for_expert(self.current_chat)
+        with self.chat_lock:
+            chats.add_user_message(self.current_chat, user_input)
+            prompt = format_prompt_for_expert(self.current_chat)
 
         if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
 
@@ -932,13 +936,15 @@ class Peer:
                 err = f"Generation timed out after {timeout}s."
                 log(err, self.peer_id, msg_type="warning")
                 log(err, self.peer_id, msg_type="warning", right=True)
-                chats.mark_last_user_failed(self.current_chat)
+                with self.chat_lock:
+                    chats.mark_last_user_failed(self.current_chat)
                 return
             except Exception as e:
                 err = f"Generation failed: {e}"
                 log(err, self.peer_id, msg_type="warning")
                 log(err, self.peer_id, msg_type="warning", right=True)
-                chats.mark_last_user_failed(self.current_chat)
+                with self.chat_lock:
+                    chats.mark_last_user_failed(self.current_chat)
                 return
 
             log(f"Answer processed locally.", self.peer_id, msg_type="text")
@@ -966,13 +972,14 @@ class Peer:
             log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok",
                 self.peer_id, msg_type="text")
 
-            chats.add_agent_message(
-                self.current_chat,
-                answer,
-                peer_pk=self.public_key,
-                model_idx=selected_model[1],
-                tag=tag_for_msg,
-            )
+            with self.chat_lock:
+                chats.add_agent_message(
+                    self.current_chat,
+                    answer,
+                    peer_pk=self.public_key,
+                    model_idx=selected_model[1],
+                    tag=tag_for_msg,
+                )
 
             return
 
