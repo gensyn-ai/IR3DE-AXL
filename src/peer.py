@@ -1,5 +1,6 @@
 import atexit
 from copy import deepcopy
+from datetime import datetime
 import os, pathlib, subprocess, uuid, requests, json, time, random
 
 import torch
@@ -111,6 +112,7 @@ class Peer:
                     self.local_b[identifier][tag] = b
 
         self.chunks = {}
+        self.conversation_histories: dict = {}
 
         self.generation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gen")
 
@@ -973,6 +975,7 @@ class Peer:
             )
 
             return
+
 
         msg_id = str(uuid.uuid4())
         msg = {
