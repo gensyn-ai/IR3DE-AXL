@@ -1081,11 +1081,13 @@ class Peer:
             log(f"Error in _continue_handle_user_input: {e}",
                 self.peer_id, msg_type="warning")
 
-    def generate_answer(self, message, model_utils):
+    def generate_answer(self, message, model_utils, max_new_tokens=None):
         encoding = model_utils['tokenizer'](message, return_tensors='pt').to(self.device)
         input_ids = encoding['input_ids']
         num_input_tokens = int(input_ids.shape[1])
-        out = redirect_prints_safe(model_utils['model'].generate, input_ids=input_ids, max_new_tokens=self.max_answer_length)
+        if max_new_tokens is None:
+            max_new_tokens = self.max_answer_length
+        out = redirect_prints_safe(model_utils['model'].generate, input_ids=input_ids, max_new_tokens=max_new_tokens)
         new_tokens = out[0, num_input_tokens:]
         answer = model_utils['tokenizer'].decode(new_tokens, skip_special_tokens=True)
         num_output_tokens = int(new_tokens.shape[0])
@@ -1158,16 +1160,15 @@ class Peer:
 
         return sum_prompt
 
-
     def _summarize(self, sum_prompt, max_chars, model_idx=0):
+        max_tokens = max(20, min(self.max_answer_length, max_chars // 3 + 10))
         try:
-            future = self.generation_executor.submit(self.generate_answer, sum_prompt, self.models[model_idx])
+            future = self.generation_executor.submit(self.generate_answer, sum_prompt, self.models[model_idx], max_tokens)
             summary, _, _ = future.result(timeout=120)
         except Exception as e:
             log(f"Summarisation failed: {e}", self.peer_id, msg_type="warning")
             return ""
         return summary.strip()[:max_chars]
-
 
     def _handle_summary(self, new_summary, chat, trimmed_pairs):
         chats.set_summary(chat, new_summary)
