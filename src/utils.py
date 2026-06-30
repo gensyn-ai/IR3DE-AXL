@@ -3,6 +3,8 @@ import ipaddress, time, io, struct, os, uuid, threading, json, contextlib, io, w
 import torch
 import numpy as np
 
+from textual.widgets import RichLog
+
 import chats
 from rich.text import Text
 from termcolor import colored
@@ -12,9 +14,8 @@ from collections import deque
 ACTIVATE_UI = True
 MAX_TITLE_CHARS = 60
 
-# Global reference to the RichLog widget — set by the app on mount
 _log_widget = None
-_output_widget = None
+_output_widgets: dict[str, "RichLog"] = {}
 
 _LOG_BUFFER_MAX = 10_000
 _log_buffer: deque = deque(maxlen=_LOG_BUFFER_MAX)
@@ -28,9 +29,16 @@ def set_log_widget(widget):
     _log_widget = widget
 
 
-def set_output_widget(widget):
-    global _output_widget
-    _output_widget = widget
+def set_output_widget(chat_id: str, widget) -> None:
+    _output_widgets[chat_id] = widget
+
+
+def unset_output_widget(chat_id: str) -> None:
+    _output_widgets.pop(chat_id, None)
+
+
+def get_output_widget(chat_id: str):
+    return _output_widgets.get(chat_id)
 
  
 MSG_TYPE_COLORS = {
@@ -151,7 +159,7 @@ def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     )
 
 
-def log(message, node_id, msg_type=None, msg_id=None, right=False):
+def log(message, node_id, msg_type=None, msg_id=None, right=False, chat_id=None):
 
     current_time = time.strftime('%H:%M:%S') + f".{int(time.time() * 1000) % 1000:03d}"
 
@@ -169,7 +177,7 @@ def log(message, node_id, msg_type=None, msg_id=None, right=False):
         line.append(time_prefix, style="dim white")
 
         if msg_type is not None:
-            if not (msg_type == 'text' and right):  # Don't show [TEXT] for right pane messages
+            if not (msg_type == 'text' and right):
                 color = MSG_TYPE_COLORS.get(msg_type, "#ffffff")
                 line.append(f"[{msg_type.upper()}]", style=f"bold {color}")
                 line.append(msg_id_str, style="#ffffff")
@@ -182,10 +190,12 @@ def log(message, node_id, msg_type=None, msg_id=None, right=False):
         with _log_lock:
             _log_buffer.append(entry)
 
-        target = _output_widget if right else _log_widget
-
-        if target is _log_widget and not _filter_predicate(msg_type):
-            return                 # filter applies only to the left logs pane
+        if right:
+            target = _output_widgets.get(chat_id) if chat_id else None
+        else:
+            if not _filter_predicate(msg_type):
+                return
+            target = _log_widget
 
         if target is not None:
             target.write(line)
@@ -468,3 +478,24 @@ def format_mean_std(values, unit="s", scale=1.0, precision=2):
     m = statistics.mean(scaled)
     s = statistics.stdev(scaled)
     return f"{m:.{precision}f} ± {s:.{precision}f} {unit}"
+
+def render_chat_history_into(chat: dict, widget) -> None:
+    """Replay a chat's persisted message list into a RichLog. Mirrors the
+    visual format of log(..., right=True) without going through it (so we
+    don't pollute _log_buffer with replays)."""
+    for m in chat.get("messages", []):
+        ts = m.get("ts", "")
+        time_part = ts.split("T", 1)[1][:8] if "T" in ts else ""
+        if m["role"] == "user":
+            node_label = "[USER]"
+        else:
+            expert = m.get("expert") or {}
+            pk = expert.get("peer_pk", "") or ""
+            node_label = f"[NODE {pk[:8]}]" if pk else "[AGENT]"
+        line = Text()
+        line.append(f"{node_label} ", style="bold dim white")
+        line.append(f"[{time_part}] ", style="dim white")
+        if m.get("status") == "failed":
+            line.append("(failed) ", style="bold red")
+        line.append(m.get("text", ""), style="#ffffff")
+        widget.write(line)

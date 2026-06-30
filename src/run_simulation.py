@@ -95,6 +95,9 @@ def run_peer(app, args):
         )
         if app is not None:
             app.peer = peer
+            app.call_from_thread(app._show_loading_chats)
+            time.sleep(0.5)
+            app.call_from_thread(app._populate_chat_tabs)
             enable_filters(app)
             enable_input(app, peer.peer_id)
         else:
@@ -175,7 +178,8 @@ def run_peer(app, args):
 
 
 def handle_input(app, args, user_input):
-    log(f"{user_input}", node_id="USER", msg_type=None, right=True)
+    chat_id = getattr(app.peer, "active_chat_id", None)
+    log(f"{user_input}", node_id="USER", msg_type=None, right=True, chat_id=chat_id)
     app.peer.handle_user_input(user_input)
 
 

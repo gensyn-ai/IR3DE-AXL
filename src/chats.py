@@ -57,7 +57,7 @@ def chat_path(chat_id: str) -> Path:
 
 # ───────────────────────── constructors ─────────────────────────
 
-def new_chat() -> dict:
+def new_chat(peer_name: str | None = None) -> dict:
     """Build a fresh empty chat. Caller is responsible for persisting it."""
     now = _now_iso()
     return {
@@ -66,6 +66,7 @@ def new_chat() -> dict:
         "created_at": now,
         "updated_at": now,
         "summary":    None,
+        "peer_name":  peer_name,
         "messages":   [],
     }
 
@@ -121,7 +122,7 @@ def mark_last_user_failed(chat: dict) -> None:
     chat["updated_at"] = _now_iso()
 
 
-def set_title(chat: dict, title: str) -> None:
+def set_title(chat: dict, title: str | None) -> None:
     chat["title"] = title
     chat["updated_at"] = _now_iso()
 

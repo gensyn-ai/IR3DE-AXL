@@ -10,9 +10,8 @@ from textual.screen import ModalScreen
 from textual.events import MouseDown, MouseUp, MouseMove
 from rich.text import Text
 
-import chats
 from utils import (format_params, format_mean_std, set_log_widget, set_output_widget, log, MSG_TYPE_COLORS,
-                   set_filter_predicate, ipv6_from_pubkey, symbol_for_tag, MAX_TITLE_CHARS)
+                   set_filter_predicate, ipv6_from_pubkey, symbol_for_tag, MAX_TITLE_CHARS, render_chat_history_into)
 from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
 
 if TYPE_CHECKING:
@@ -482,6 +481,7 @@ class SimApp(App):
         self._show_all_latencies = False
         self._latency_plot_last: tuple | None = None
         self._latency_metric = "prompt"   # one of: 'prompt' | 'total' | 'input'
+        self._loading_label = "Loading local models"
 
     def compose(self) -> ComposeResult:
 
@@ -555,19 +555,17 @@ class SimApp(App):
 
             yield ResizableDivider(id="divider")
 
-            # ───── RIGHT PANE: Chat (single tab) ─────
+            # ───── RIGHT PANE: Chats ─────
             with Vertical(id="right-pane"):
                 with TabbedContent(id="right-tabs"):
-
-                    with TabPane("Chat", id="tab-chat"):
-                        yield Static("Loading local models", id="loading-msg")
-                        yield RichLog(id="output", highlight=False, markup=False,
-                                    auto_scroll=True, wrap=True)
-                        yield Static("", id="input-divider")
-                        with Horizontal(id="input-row"):
-                            yield Static("> ", id="prompt")
-                            yield SubmittableTextArea(id="user-input")
-                            yield Static("[SEND]", id="send-button", markup=False)
+                    with TabPane("...", id="tab-chat-placeholder"):
+                        yield Static(DIAMOND_FRAMES[0], id="right-spinner")
+                yield Static("Loading local models", id="loading-msg")
+                yield Static("", id="input-divider")
+                with Horizontal(id="input-row"):
+                    yield Static("> ", id="prompt")
+                    yield SubmittableTextArea(id="user-input")
+                    yield Static("[SEND]", id="send-button", markup=False)
 
             yield Static("", id="border-right")
 
@@ -578,9 +576,7 @@ class SimApp(App):
         self._fill_bars()
 
         log_widget = self.query_one("#logs", RichLog)
-        output_widget = self.query_one("#output", RichLog)
         set_log_widget(log_widget)
-        set_output_widget(output_widget)
 
         self.query_one("#user-input", TextArea).focus()
 
@@ -1395,9 +1391,9 @@ class SimApp(App):
         self._loading_dots = (self._loading_dots + 1) % 4
         try:
             msg = self.query_one("#loading-msg", Static)
-            msg.update("Loading local models" + "." * self._loading_dots)
+            msg.update(self._loading_label + "." * self._loading_dots)
         except Exception:
-            pass    # widget may not be mounted yet
+            pass
 
     def _hide_loading_msg(self) -> None:
         # Chat tab loading line (existing)
@@ -1431,7 +1427,7 @@ class SimApp(App):
     def _tick_control_spinner(self) -> None:
         self._control_spinner_frame = (self._control_spinner_frame + 1) % len(DIAMOND_ROTATION)
         frame = DIAMOND_FRAMES[DIAMOND_ROTATION[self._control_spinner_frame]]
-        for spinner_id in ("#control-spinner", "#stats-spinner"):
+        for spinner_id in ("#control-spinner", "#stats-spinner", "#right-spinner"):
             try:
                 self.query_one(spinner_id, Static).update(frame)
             except Exception:
@@ -1555,33 +1551,111 @@ class SimApp(App):
         self._refresh_latency_plot()
     
     def _refresh_chat_tab_title(self) -> None:
-        """Make the right-pane tab label mirror the chat's title (or 'Chat' if
+        """Make every right-pane tab label mirror its chat's title (or 'Chat' if
         no title has been generated/set yet)."""
         if self.peer is None:
             return
-        title = self.peer.current_chat.get("title")
-        label = title if title else "Chat"
-        try:
-            tab = self.query_one("#right-tabs", TabbedContent).get_tab("tab-chat")
-            if str(tab.label) != label:
-                tab.label = label
-        except Exception:
-            pass     # widget not mounted yet, or Textual version difference
+        tabbed = self.query_one("#right-tabs", TabbedContent)
+        for chat_id, chat in self.peer.chats.items():
+            label = chat.get("title") or "Chat"
+            try:
+                tab = tabbed.get_tab(f"tab-chat-{chat_id}")
+                if str(tab.label) != label:
+                    tab.label = label
+            except Exception:
+                continue
 
     def _open_chat_rename_dialog(self) -> None:
         if self.peer is None:
             return
-        current = self.peer.current_chat.get("title") or ""
+        chat = self.peer.current_chat
+        if chat is None:
+            return
+        current = chat.get("title") or ""
         self.push_screen(ChatTitleRenameScreen(current), self._on_chat_renamed)
 
     def _on_chat_renamed(self, new_title) -> None:
         if new_title is None or self.peer is None:
             return
+        chat = self.peer.current_chat
+        if chat is None:
+            return
+        import chats
         new_title = (new_title or "").strip()[:MAX_TITLE_CHARS]
         if new_title:
-            chats.set_title(self.peer.current_chat, new_title)
+            chats.set_title(chat, new_title)
         else:
-            chats.set_title(self.peer.current_chat, "Chat")
+            chats.set_title(chat, None)
         self._refresh_chat_tab_title()
-        log(f"Chat renamed to: '{new_title or '(default)'}'",
-            node_id=self.peer.peer_id, msg_type="text")
+        log(f"Chat renamed to: '{new_title or '(default)'}'", node_id=self.peer.peer_id, msg_type="text")
+    
+    def _populate_chat_tabs(self) -> None:
+        """Called from run_peer once `app.peer` is set. Replaces the placeholder
+        tab with one TabPane per loaded chat, replays each chat's history into
+        its widget, and activates the chat that peer.active_chat_id points to."""
+        if self.peer is None:
+            return
+
+        tabbed = self.query_one("#right-tabs", TabbedContent)
+
+        # Remove the placeholder (if it's still there)
+        try:
+            tabbed.remove_pane("tab-chat-placeholder")
+        except Exception:
+            pass
+
+        # Add a TabPane for each chat
+        for chat_id, chat in self.peer.chats.items():
+            self._mount_chat_tab(chat_id, chat)
+
+        # Activate the chat the peer thinks is active
+        if self.peer.active_chat_id is not None:
+            try:
+                tabbed.active = f"tab-chat-{self.peer.active_chat_id}"
+            except Exception:
+                pass
+
+
+    def _mount_chat_tab(self, chat_id: str, chat: dict) -> None:
+        """Create a new TabPane for `chat`, mount it, register its RichLog
+        with utils._output_widgets, and replay the chat's history into it."""
+
+        title = chat.get("title") or "Chat"
+        pane_id = f"tab-chat-{chat_id}"
+
+        pane = TabPane(title, id=pane_id)
+        # Add the pane and its RichLog
+        tabbed = self.query_one("#right-tabs", TabbedContent)
+        tabbed.add_pane(pane)
+        output = RichLog(id=f"output-{chat_id}", classes="chat-output",
+                        highlight=False, markup=False,
+                        auto_scroll=True, wrap=True)
+        pane.mount(output)
+
+        set_output_widget(chat_id, output)
+        render_chat_history_into(chat, output)
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """When the user switches tabs, update which chat new submissions go to."""
+        if self.peer is None:
+            return
+        tab_id = event.tab.id or ""
+        # Textual auto-prefixes Tab ids with "--content-tab-" derived from the
+        # owning TabPane's id. Strip it to recover the pane id we set.
+        if tab_id.startswith("--content-tab-"):
+            tab_id = tab_id[len("--content-tab-"):]
+        prefix = "tab-chat-"
+        if tab_id.startswith(prefix):
+            chat_id = tab_id[len(prefix):]
+            if chat_id in self.peer.chats:
+                self.peer.active_chat_id = chat_id
+
+    def _show_loading_chats(self) -> None:
+        """Swap the animated loading message to 'Loading chats' (used during the
+        brief window between models being loaded and chat tabs being populated)."""
+        self._loading_label = "Loading chats"
+        try:
+            msg = self.query_one("#loading-msg", Static)
+            msg.update(self._loading_label + "." * self._loading_dots)
+        except Exception:
+            pass

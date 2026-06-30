@@ -27,7 +27,7 @@ Horizontal {
     color: #ffffff;
 }
 
-#logs, #output {
+#logs {
     scrollbar-size-vertical: 2;
     scrollbar-size-horizontal: 0;
     scrollbar-background: #0e5200;
@@ -36,10 +36,6 @@ Horizontal {
     scrollbar-color: #1c9800;
     scrollbar-color-active: #126900;
     scrollbar-color-hover: #11ff00;
-}
-
-#output {
-    height: 1fr;
 }
 
 #input-row {
@@ -421,18 +417,15 @@ ModelRow.-active .model-row-name {
     text-style: italic;
 }
 
-#control-spinner {
+#control-spinner, #stats-spinner, #right-spinner {
     width: 100%;
     height: 1fr;
     content-align: center middle;
     color: #fad7d1;
 }
 
-#stats-spinner {
-    width: 100%;
-    height: 1fr;
-    content-align: center middle;
-    color: #fad7d1;
+#right-spinner {
+    margin-top: 3;
 }
 
 #latency-plot-header {
@@ -530,4 +523,17 @@ ChatTitleRenameScreen {
 
 #chat-rename-input:focus {
     border: solid #237dfa;
+}
+
+.chat-output {
+    height: 1fr;
+    width: 100%;
+    scrollbar-size-vertical: 2;
+    scrollbar-size-horizontal: 0;
+    scrollbar-background: #0e5200;
+    scrollbar-background-hover: #0e5200;
+    scrollbar-background-active: #0e5200;
+    scrollbar-color: #1c9800;
+    scrollbar-color-active: #126900;
+    scrollbar-color-hover: #11ff00;
 }
