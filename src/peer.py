@@ -15,6 +15,8 @@ from utils import (ipv6_from_pubkey, log, redirect_prints_safe, serialize_safe, 
 
 AXL = "http://127.0.0.1:91"
 
+PEER_DEAD_TIMEOUT = 300  # seconds with no inbound from a peer before it's pruned (refreshed on any inbound)
+
 
 class Peer:
 
@@ -49,6 +51,7 @@ class Peer:
         self.ipv6_address = self.topology['our_ipv6']
         self.known_public_keys = {}
         self.awaiting_acks = {}
+        self.last_seen = {}  # pk -> last time we received anything from it; drives pruning
 
         self.known_tags = []
         self.selected_tags: set[str] = set()
@@ -202,6 +205,7 @@ class Peer:
         self.known_public_keys[sender] = {}
         self.known_public_keys[sender]["peer_id"] = msg.get("peer_id")
         self.known_public_keys[sender]["peer_name"] = msg.get("peer_name")
+        self.last_seen[sender] = time.time()  # start the liveness clock at discovery
 
     def recv_loop(self, timeout=120):
         
@@ -270,6 +274,7 @@ class Peer:
                     log(f"Received message without sender information. Ignoring. Message content (truncated): {str(resp.text)[:100]}...", self.peer_id, msg_type="warning")
                     time.sleep(0.5)
                     continue
+                self.last_seen[sender] = time.time()  # any inbound message proves the peer is alive
                 if resp.text is None or resp.text == "":
                     log(f"Received empty message from {sender[:8]}.... Ignoring.", self.peer_id, msg_type="warning")
                     time.sleep(0.5)
@@ -648,6 +653,25 @@ class Peer:
                     ).start()
 
             del self.awaiting_acks[msg_id]
+
+        # Drop peers we haven't heard anything from in a while. last_seen is refreshed on
+        # every inbound message (recv_loop), and a live peer gossips greetings/knowledge/info
+        # regularly — so this only fires for peers that have genuinely gone silent.
+        current_time = time.time()
+        for pk in [p for p in self.known_public_keys
+                   if current_time - self.last_seen.get(p, current_time) > PEER_DEAD_TIMEOUT]:
+            self.prune_peer(pk)
+
+    def prune_peer(self, pk):
+        """Forget a peer we've stopped hearing from, and any state that references it."""
+        info = self.known_public_keys.pop(pk, None)
+        self.last_seen.pop(pk, None)
+        self.chunks.pop(pk, None)
+        for mid in [m for m, a in self.awaiting_acks.items() if a.get("receiver") == pk]:
+            del self.awaiting_acks[mid]
+        peer_id = info.get("peer_id") if info else "?"
+        log(f"Pruned peer {pk[:8]}... (ID {peer_id}) — no contact for over {PEER_DEAD_TIMEOUT}s.",
+            self.peer_id, msg_type="warning")
 
     def share_stats_and_models_info(self, num_peers_to_share=5, timeout=5):
 
@@ -1067,7 +1091,13 @@ class Peer:
                 "selected_model": selected_model,
                 "message":        prompt,
             }
-            self.send(msg, selected_model[0], timeout=timeout)
+            sent = self.send(msg, selected_model[0], timeout=timeout)
+            if not sent:
+                log(f"Could not reach the peer hosting your selected model ({selected_model[0][:8]}...). "
+                    f"It will be deselected automatically if it stays offline; please try again.",
+                    self.peer_id, msg_type="warning", right=True)
+                chats.mark_last_user_failed(self.current_chat)
+                return
 
             self.awaiting_acks[msg_id] = {
                 "type":       "text",
