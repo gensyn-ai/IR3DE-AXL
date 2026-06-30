@@ -499,3 +499,35 @@ LatencyMetricSelectScreen {
 #divider:hover {
     background: #237dfa;
 }
+
+ChatTitleRenameScreen {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.4);
+}
+
+#chat-rename-dialog {
+    width: 60;
+    height: auto;
+    background: #1a1a1a;
+    border: round #237dfa;
+    padding: 1 2;
+}
+
+#chat-rename-title {
+    width: 100%;
+    color: #237dfa;
+    text-style: bold;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#chat-rename-input {
+    width: 100%;
+    margin: 0;
+    border: solid #555555;
+    background: #0e0e0e;
+}
+
+#chat-rename-input:focus {
+    border: solid #237dfa;
+}

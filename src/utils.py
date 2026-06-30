@@ -10,6 +10,7 @@ from collections import deque
 
 
 ACTIVATE_UI = True
+MAX_TITLE_CHARS = 60
 
 # Global reference to the RichLog widget — set by the app on mount
 _log_widget = None
@@ -94,6 +95,12 @@ SUMMARY_SYSTEM_PROMPT = (
     "summary text — no preamble, no apologies, no formatting."
 )
 
+
+TITLE_SYSTEM_PROMPT = (
+    "Read the exchange below and produce a concise chat title (at most "
+    "6 words, no quotes, no trailing punctuation) that captures the topic. "
+    "Output ONLY the title text — no preamble, no explanation."
+)
 
 def format_prompt_for_expert(chat: dict) -> str:
     """Build the text prompt sent to the expert from the chat's sendable

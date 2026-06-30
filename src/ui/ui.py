@@ -1,9 +1,8 @@
 import os, random, threading, statistics
-
-from utils import format_params, format_mean_std, set_log_widget, set_output_widget
+from typing import TYPE_CHECKING
 
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable, OptionList
+from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable, OptionList, Input
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual_plotext import PlotextPlot
@@ -11,10 +10,11 @@ from textual.screen import ModalScreen
 from textual.events import MouseDown, MouseUp, MouseMove
 from rich.text import Text
 
-from utils import log, MSG_TYPE_COLORS, set_filter_predicate, ipv6_from_pubkey, symbol_for_tag
+import chats
+from utils import (format_params, format_mean_std, set_log_widget, set_output_widget, log, MSG_TYPE_COLORS,
+                   set_filter_predicate, ipv6_from_pubkey, symbol_for_tag, MAX_TITLE_CHARS)
 from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
 
-from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from peer import Peer
 
@@ -428,6 +428,32 @@ class ResizableDivider(Static):
         right.styles.width = total_inner - new_left
         event.stop()
 
+class ChatTitleRenameScreen(ModalScreen):
+    """Single-field modal that returns the new chat title, or None if cancelled."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, current_title: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self._current_title = current_title
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="chat-rename-dialog"):
+            yield Static("Rename chat", id="chat-rename-title")
+            yield Input(value=self._current_title,
+                        placeholder="Chat title (Enter to confirm, Esc to cancel)",
+                        id="chat-rename-input",
+                        max_length=MAX_TITLE_CHARS)
+
+    def on_mount(self) -> None:
+        self.query_one("#chat-rename-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
 class SimApp(App):
     CSS = read_css()
     BINDINGS = [("ctrl+c", "quit", "Quit")]
@@ -474,16 +500,15 @@ class SimApp(App):
                     with TabPane("Control Panel", id="tab-control"):
                         yield Static(DIAMOND_FRAMES[0], id="control-spinner")
                         with VerticalScroll(id="control-scroll"):
-                            yield Static("Expertise Selection", id="expertise-title",
+                            yield Static("Expertise selection", id="expertise-title",
                                         classes="control-section-title")
                             yield Static(
-                                "Choose one or more expertise domains. Selected expertise "
-                                "will determine available models.",
+                                "Choose one or more expertise. Selected expertise will determine the available models.",
                                 id="expertise-desc",
                                 classes="control-section-desc",
                             )
                             yield Vertical(id="tag-buttons-container")
-                            yield Static("Model Selection (one per selected expertise)",
+                            yield Static("Model selection (one per selected expertise)",
                                         id="model-selection-title",
                                         classes="control-section-title")
                             yield Vertical(id="expertise-sections")
@@ -767,6 +792,7 @@ class SimApp(App):
             self.query_one(wid, Static).update(bar)
 
     def on_click(self, event):
+
         if event.control is None:
             return
         if event.control.id == "filter-toggle":
@@ -779,6 +805,23 @@ class SimApp(App):
             self.query_one("#user-input", SubmittableTextArea).submit()
         elif event.control.id == "latency-metric-button":
             self.push_screen(LatencyMetricSelectScreen(), self._on_latency_metric_chosen)
+        
+        if event.chain == 2:
+            node = event.control
+            for _ in range(6):                          # walk a few levels up
+                if node is None:
+                    break
+                node_id = getattr(node, "id", None) or ""
+                # match the Tab generated for our "tab-chat" TabPane, but not the
+                # scroll container or anything else that happens to contain it
+                if "tab-chat" in node_id and "scroll" not in node_id and node_id != "tab-chat":
+                    self._open_chat_rename_dialog()
+                    return
+                # also accept a direct click on the TabPane label area
+                if node_id == "tab-chat":
+                    self._open_chat_rename_dialog()
+                    return
+                node = getattr(node, "parent", None)
 
     def _toggle_drawer(self):
         drawer = self.query_one("#filter-drawer")
@@ -881,6 +924,7 @@ class SimApp(App):
         self._refresh_latency_plot()
         self._refresh_tag_buttons()
         self._refresh_expertise_sections()
+        self._refresh_chat_tab_title()
 
     def _refresh_models_table(self):
         if self.peer is None:
@@ -1509,3 +1553,35 @@ class SimApp(App):
         )
         self._latency_plot_last = None    # force redraw with new metric
         self._refresh_latency_plot()
+    
+    def _refresh_chat_tab_title(self) -> None:
+        """Make the right-pane tab label mirror the chat's title (or 'Chat' if
+        no title has been generated/set yet)."""
+        if self.peer is None:
+            return
+        title = self.peer.current_chat.get("title")
+        label = title if title else "Chat"
+        try:
+            tab = self.query_one("#right-tabs", TabbedContent).get_tab("tab-chat")
+            if str(tab.label) != label:
+                tab.label = label
+        except Exception:
+            pass     # widget not mounted yet, or Textual version difference
+
+    def _open_chat_rename_dialog(self) -> None:
+        if self.peer is None:
+            return
+        current = self.peer.current_chat.get("title") or ""
+        self.push_screen(ChatTitleRenameScreen(current), self._on_chat_renamed)
+
+    def _on_chat_renamed(self, new_title) -> None:
+        if new_title is None or self.peer is None:
+            return
+        new_title = (new_title or "").strip()[:MAX_TITLE_CHARS]
+        if new_title:
+            chats.set_title(self.peer.current_chat, new_title)
+        else:
+            chats.set_title(self.peer.current_chat, "Chat")
+        self._refresh_chat_tab_title()
+        log(f"Chat renamed to: '{new_title or '(default)'}'",
+            node_id=self.peer.peer_id, msg_type="text")

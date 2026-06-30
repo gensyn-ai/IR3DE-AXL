@@ -10,7 +10,8 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 import chats
 from ir3de_stats.models.llama_experts import get_llama_expert
 from utils import (ipv6_from_pubkey, log, redirect_prints_safe, serialize_safe, deserialize_safe,
-                   deserialize_chunk_header, format_prompt_for_expert, SUMMARY_SYSTEM_PROMPT)
+                   deserialize_chunk_header, format_prompt_for_expert, SUMMARY_SYSTEM_PROMPT,
+                   TITLE_SYSTEM_PROMPT, MAX_TITLE_CHARS)
 
 
 AXL = "http://127.0.0.1:91"
@@ -294,18 +295,35 @@ class Peer:
                     answer, num_input_tokens, num_output_tokens = self.generate_answer(message, model_utils)
                     log(f"To {sender[:8]}...: {answer}", self.peer_id, msg_type="text")
 
+                    # If the requester asked for a title, generate one with the same expert
+                    # that just answered. The user's text is the last 'User:' block of the
+                    # received prompt; for the first turn that's the only one.
+                    title = ""
+                    if msg.get("request_title"):
+                        user_text = ""
+                        if isinstance(message, str):
+                            # Take everything after the last "User:" up to the next "Agent:"
+                            # (works because we always end the prompt with "Agent: ").
+                            after_user = message.rsplit("User:", 1)
+                            if len(after_user) == 2:
+                                user_text = after_user[1].split("Agent:", 1)[0].strip()
+                        if user_text:
+                            title = self._generate_title(user_text, answer, msg['selected_model'][1])
+
+
                     msg_id = str(uuid.uuid4())
                     answer_msg = {
-                        "orig_msg_id": msg.get("msg_id"),
-                        "msg_id": msg_id,
-                        "type": "answer",
-                        "from": self.public_key,
-                        "peer_id": self.peer_id,
-                        "peer_name": self.node_name,
-                        "message": answer,
-                        "selected_model": msg.get("selected_model"),
-                        "num_input_tokens": num_input_tokens,
-                        "num_output_tokens": num_output_tokens
+                        "orig_msg_id":       msg.get("msg_id"),
+                        "msg_id":            msg_id,
+                        "type":              "answer",
+                        "from":              self.public_key,
+                        "peer_id":           self.peer_id,
+                        "peer_name":         self.node_name,
+                        "message":           answer,
+                        "selected_model":    msg.get("selected_model"),
+                        "num_input_tokens":  num_input_tokens,
+                        "num_output_tokens": num_output_tokens,
+                        "title":             title,
                     }
                     self.send(answer_msg, sender, timeout=timeout)
                 
@@ -353,6 +371,12 @@ class Peer:
                                 model_idx=sel[1],
                                 tag=pending.get("tag"),
                             )
+                            title = msg.get("title")
+                            if title and self.current_chat.get("title") is None:
+                                cleaned = self._clean_title(title)
+                                if cleaned:
+                                    chats.set_title(self.current_chat, cleaned)
+                                    log(f"Chat title set: '{cleaned}'", self.peer_id, msg_type="text")
 
                 elif msg.get("type") == 'summary-req':
                     log(f"Received summary request from {sender[:8]}...", self.peer_id, msg_type="summary-req")
@@ -1053,6 +1077,17 @@ class Peer:
                     model_idx=selected_model[1],
                     tag=tag_for_msg,
                 )
+                
+                if self.current_chat.get("title") is None:
+                    msgs = self.current_chat.get("messages", [])
+                    user_msg  = next((m for m in msgs if m["role"] == "user"  and m.get("status", "ok") == "ok"), None)
+                    agent_msg = next((m for m in msgs if m["role"] == "agent" and m.get("status", "ok") == "ok"), None)
+                    if user_msg is not None and agent_msg is not None:
+                        title = self._generate_title(user_msg["text"], agent_msg["text"], selected_model[1])
+                        if title:
+                            chats.set_title(self.current_chat, title)
+                            log(f"Chat title set: '{title}'", self.peer_id, msg_type="text")
+
                 return
 
             # Remote path
@@ -1066,6 +1101,7 @@ class Peer:
                 "assigned_tag":   assigned_tag,
                 "selected_model": selected_model,
                 "message":        prompt,
+                "request_title":  self.current_chat.get("title") is None
             }
             self.send(msg, selected_model[0], timeout=timeout)
 
@@ -1078,8 +1114,7 @@ class Peer:
             }
 
         except Exception as e:
-            log(f"Error in _continue_handle_user_input: {e}",
-                self.peer_id, msg_type="warning")
+            log(f"Error in _continue_handle_user_input: {e}", self.peer_id, msg_type="warning")
 
     def generate_answer(self, message, model_utils, max_new_tokens=None):
         encoding = model_utils['tokenizer'](message, return_tensors='pt').to(self.device)
@@ -1247,3 +1282,34 @@ class Peer:
             "timestamp": time.time(),
         }
         return True
+
+    def _clean_title(self, title):
+        if not title:
+            return ""
+        title = title.strip().split("\n", 1)[0].strip().strip('"\'').strip()
+        words = title.split()
+        if len(words) > 6:
+            title = " ".join(words[:6])
+        return title[:MAX_TITLE_CHARS]
+
+
+    def _generate_title(self, user_text, agent_text, model_idx):
+        """Generate a chat title from a user/agent exchange using a local model.
+        Returns the cleaned title string, or '' on failure. Synchronous."""
+        if model_idx >= len(self.models):
+            return ""
+        title_prompt = (
+            f"{TITLE_SYSTEM_PROMPT}\n\n"
+            f"User: {user_text}\n"
+            f"Agent: {agent_text}\n\n"
+            f"Title:"
+        )
+        try:
+            future = self.generation_executor.submit(
+                self.generate_answer, title_prompt, self.models[model_idx], 20  # max_new_tokens
+            )
+            title, _, _ = future.result(timeout=60)
+        except Exception as e:
+            log(f"Title generation failed: {e}", self.peer_id, msg_type="warning")
+            return ""
+        return self._clean_title(title)
