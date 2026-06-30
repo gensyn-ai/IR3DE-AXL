@@ -737,11 +737,6 @@ class Peer:
             return
         
         log(f"Shared stats with {sender[:8]}... in response to stats request. msg_id = {msg_id}", self.peer_id, msg_type="stats", msg_id=msg_id)
-        self.awaiting_acks[msg_id] = {
-            "type": "stats",
-            "receiver": sender,
-            "timestamp": time.time()
-        }
 
     def get_token_router(self):
         
