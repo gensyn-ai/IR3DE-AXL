@@ -190,7 +190,7 @@ class FollowTailLog(RichLog):
             width=width,
             expand=expand,
             shrink=shrink,
-            scroll_end=at_bottom,    # still always recomputed
+            scroll_end=at_bottom,
             animate=animate,
         )
 
