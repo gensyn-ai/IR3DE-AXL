@@ -26,6 +26,10 @@ def get_args():
     parser.add_argument("--ir3de-lambda", type=float, default=0.01)
     parser.add_argument("--ir3de-entropy-top-k", type=int, default=10)
     parser.add_argument("--max-answer-length", type=int, default=256)
+    parser.add_argument( "--num-characters-conversation-history", type=int, default=1000, 
+                        help="Maximum character budget for the prompt sent to experts (system "
+                             "prompt + summary + history). When exceeded, oldest user/agent pairs "
+                             "are summarised. Set to 0 to disable.")
     return parser.parse_args()
  
  
@@ -86,7 +90,8 @@ def run_peer(app, args):
             peer_id=args.peer_id,
             ir3de_lambda=args.ir3de_lambda,
             ir3de_entropy_top_k=args.ir3de_entropy_top_k,
-            max_answer_length=args.max_answer_length
+            max_answer_length=args.max_answer_length,
+            num_characters_conversation_history=args.num_characters_conversation_history
         )
         if app is not None:
             app.peer = peer

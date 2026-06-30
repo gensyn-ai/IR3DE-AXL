@@ -1,4 +1,4 @@
-import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit, threading
+import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit
 from copy import deepcopy
 
 import torch
@@ -9,47 +9,16 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 import chats
 from ir3de_stats.models.llama_experts import get_llama_expert
-from utils import ipv6_from_pubkey, log, redirect_prints_safe, serialize_safe, deserialize_safe, deserialize_chunk_header
+from utils import (ipv6_from_pubkey, log, redirect_prints_safe, serialize_safe, deserialize_safe,
+                   deserialize_chunk_header, format_prompt_for_expert, SUMMARY_SYSTEM_PROMPT)
 
 
 AXL = "http://127.0.0.1:91"
-AGENT_SYSTEM_PROMPT = (
-    "You are one agent in a multi-agent chat system.\n\n"
-    "You will receive the full conversation history so far.\n"
-    "The history contains messages from the user and from previous agents.\n"
-    "Use the history as context.\n"
-    "Answer the latest user message.\n\n"
-    "Important:\n"
-    "- Previous agent messages are context, not guaranteed truth.\n"
-    "- The user's messages define the actual request.\n"
-    "- Do not assume hidden information outside the transcript."
-)
-
-
-def format_prompt_for_expert(chat: dict) -> str:
-    """Build the text prompt sent to the expert from the chat's sendable
-    history. Plain 'User:' / 'Agent:' role markers — model-agnostic. The
-    trailing 'Agent: ' primes the model to continue.
-
-    Note: we deliberately do *not* use tokenizer chat templates here because
-    different experts in the network use different tokenizers. Plain text
-    works on all of them; quality is marginally below template-formatted
-    chat but uniform across the network.
-    """
-    parts = [AGENT_SYSTEM_PROMPT, ""]
-    if chat.get("summary"):
-        parts.append("Summary of the chat: " + chat["summary"])
-        parts.append("")
-    for m in chats.history_for_expert(chat):
-        prefix = "User" if m["role"] == "user" else "Agent"
-        parts.append(f"{prefix}: {m['text']}")
-    parts.append("Agent: ")
-    return "\n".join(parts)
 
 
 class Peer:
 
-    def __init__(self, peer_id, ir3de_lambda=0.01, ir3de_entropy_top_k=10, max_answer_length=256):
+    def __init__(self, peer_id, ir3de_lambda=0.01, ir3de_entropy_top_k=10, max_answer_length=256, num_characters_conversation_history=8000):
         
         with open(f"ir3de_stats/default_stats.json", "r") as f:
             default_stats = json.load(f)
@@ -95,6 +64,7 @@ class Peer:
         self.default_lambda = ir3de_lambda
         self.entropy_top_k = ir3de_entropy_top_k
         self.max_answer_length = max_answer_length
+        self.budget_chars = num_characters_conversation_history
 
         self.local_A = {}
         self.local_b = {}
@@ -117,8 +87,6 @@ class Peer:
 
         self.current_chat = chats.new_chat()
         atexit.register(self._save_current_chat_safely)
-
-        self.chat_lock = threading.Lock()
     
     def get_topology(self, session):
         resp = session.get(f"{AXL}{self.peer_id:02d}/topology", timeout=5)
@@ -377,13 +345,12 @@ class Peer:
                         log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok", self.peer_id, msg_type="text")
 
                         if sel is not None:
-                            with self.chat_lock:
-                                chats.add_agent_message(
-                                    self.current_chat, msg.get("message", ""),
-                                    peer_pk=sel[0],
-                                    model_idx=sel[1],
-                                    tag=pending.get("tag"),
-                                )
+                            chats.add_agent_message(
+                                self.current_chat, msg.get("message", ""),
+                                peer_pk=sel[0],
+                                model_idx=sel[1],
+                                tag=pending.get("tag"),
+                            )
                 
                 elif msg.get("type") in ("greeting", "greeting-ack"):
 
@@ -921,9 +888,9 @@ class Peer:
                 return
 
         tag_for_msg = assigned_tag if assigned_tag and assigned_tag != "(unrouted)" else None
-        with self.chat_lock:
-            chats.add_user_message(self.current_chat, user_input)
-            prompt = format_prompt_for_expert(self.current_chat)
+        chats.add_user_message(self.current_chat, user_input)
+        self._ensure_within_budget()
+        prompt = format_prompt_for_expert(self.current_chat)
 
         if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
 
@@ -936,15 +903,13 @@ class Peer:
                 err = f"Generation timed out after {timeout}s."
                 log(err, self.peer_id, msg_type="warning")
                 log(err, self.peer_id, msg_type="warning", right=True)
-                with self.chat_lock:
-                    chats.mark_last_user_failed(self.current_chat)
+                chats.mark_last_user_failed(self.current_chat)
                 return
             except Exception as e:
                 err = f"Generation failed: {e}"
                 log(err, self.peer_id, msg_type="warning")
                 log(err, self.peer_id, msg_type="warning", right=True)
-                with self.chat_lock:
-                    chats.mark_last_user_failed(self.current_chat)
+                chats.mark_last_user_failed(self.current_chat)
                 return
 
             log(f"Answer processed locally.", self.peer_id, msg_type="text")
@@ -972,14 +937,13 @@ class Peer:
             log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok",
                 self.peer_id, msg_type="text")
 
-            with self.chat_lock:
-                chats.add_agent_message(
-                    self.current_chat,
-                    answer,
-                    peer_pk=self.public_key,
-                    model_idx=selected_model[1],
-                    tag=tag_for_msg,
-                )
+            chats.add_agent_message(
+                self.current_chat,
+                answer,
+                peer_pk=self.public_key,
+                model_idx=selected_model[1],
+                tag=tag_for_msg,
+            )
 
             return
 
@@ -1060,9 +1024,95 @@ class Peer:
             pass
           
     def _save_current_chat_safely(self) -> None:
-        """Persist the current chat on process exit. Swallows errors so we never
-        raise during interpreter shutdown."""
+        chats.save_chat(self.current_chat)
+
+
+    def _summarise_locally(self, existing_summary, trimmed_pairs, max_chars):
+        """Generate a new summary using a local model.
+
+        Inputs:
+        existing_summary  - the chat's current summary (may be None) - folded
+                            into the new one so we don't lose context across
+                            repeated summarisations.
+        trimmed_pairs     - list of (user_msg, agent_msg) dicts just popped
+                            from the front of the chat.
+        max_chars         - upper bound on the returned summary's length.
+
+        Returns the new summary string (truncated to max_chars if the model
+        overshoots), or an empty string if summarisation fails or there's no
+        local model available. Does not mutate self.current_chat.
+        """
+        if not self.models or max_chars < 50:
+            return ""
+
+        # Always use the first local model for summarisation. Keeps the lock-
+        # holding window short and avoids the deadlock we'd get going through
+        # the network for this.
+        model_utils = self.models[0]
+
+        parts = [SUMMARY_SYSTEM_PROMPT.format(max_chars=max_chars), ""]
+        if existing_summary:
+            parts.append("Existing summary so far:")
+            parts.append(existing_summary)
+            parts.append("")
+            parts.append("Additional turns to fold into it:")
+        else:
+            parts.append("Conversation to summarise:")
+        for user_msg, agent_msg in trimmed_pairs:
+            parts.append(f"User: {user_msg['text']}")
+            parts.append(f"Agent: {agent_msg['text']}")
+        parts.append("")
+        parts.append("Summary:")
+        sum_prompt = "\n".join(parts)
+
         try:
-            chats.save_chat(self.current_chat)
-        except Exception:
-            pass
+            future = self.generation_executor.submit(self.generate_answer, sum_prompt, model_utils, True)
+            summary, _, _ = future.result(timeout=120)
+        except Exception as e:
+            log(f"Summarisation failed: {e}", self.peer_id, msg_type="warning")
+            return ""
+
+        return summary.strip()[:max_chars]
+
+
+    def _ensure_within_budget(self):
+        """If the current prompt exceeds self.budget_chars, drop oldest user/
+        agent couples from the front and fold them into the chat's summary
+        until the prompt fits within 80% of the budget (leaving 20% room for
+        the new summary).
+
+        Assumes self.chat_lock is held by the caller. No-op if budget_chars
+        is non-positive.
+        """
+        if self.budget_chars <= 0:
+            return
+
+        chat = self.current_chat
+        current_size = len(format_prompt_for_expert(chat))
+        if current_size <= self.budget_chars:
+            return
+
+        log(f"Conversation history ({current_size} chars) exceeds budget ({self.budget_chars}). Trimming and summarising.",
+            self.peer_id, msg_type="summary")
+
+        target = int(0.8 * self.budget_chars)
+        trimmed_pairs = []
+        while len(format_prompt_for_expert(chat)) > target:
+            pair = chats.trim_oldest_pair(chat)
+            if pair is None:
+                break                                  # nothing left to drop
+            trimmed_pairs.append(pair)
+
+        if not trimmed_pairs:
+            log("Budget exceeded but no complete (user, agent) couple at the "
+                "head of the history to drop. Sending unchanged.",
+                self.peer_id, msg_type="warning")
+            return
+
+        # Whatever room is left between the post-trim prompt and the budget
+        # is what the summary may occupy.
+        room = int(0.8 * (self.budget_chars - len(format_prompt_for_expert(chat))))
+        new_summary = self._summarise_locally(chat.get("summary"), trimmed_pairs, room)
+        if new_summary:
+            chats.set_summary(chat, new_summary)
+            log(f"Summary updated ({len(new_summary)} chars covering {len(trimmed_pairs)} dropped pairs).", self.peer_id, msg_type="summary")

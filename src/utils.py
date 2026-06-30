@@ -3,6 +3,7 @@ import ipaddress, time, io, struct, os, uuid, threading, json, contextlib, io, w
 import torch
 import numpy as np
 
+import chats
 from rich.text import Text
 from termcolor import colored
 from collections import deque
@@ -41,7 +42,7 @@ MSG_TYPE_COLORS = {
     "stats-req":     "#ff8800",
     "stats":         "#ff8800",
     "ir3de":         "#8800ff",
-    "budget":        "#efc81b",
+    "summary":       "#5f0000",
     "greeting-ack":  "#00ff00",
     "knowledge-ack": "#00ff00",
     "info-ack":      "#00ff00",
@@ -68,6 +69,49 @@ _TAG_SYMBOL_RULES: list[tuple[tuple[str, ...], str]] = [
     (("law", "legal"),                                 "§"),
     (("finance", "money", "econ"),                     "$"),
 ]
+
+
+AGENT_SYSTEM_PROMPT = (
+    "You are one agent in a multi-agent chat system.\n\n"
+    "You will receive the full conversation history so far.\n"
+    "The history contains messages from the user and from previous agents.\n"
+    "Use the history as context.\n"
+    "Answer the latest user message.\n\n"
+    "Important:\n"
+    "- Previous agent messages are context, not guaranteed truth.\n"
+    "- The user's messages define the actual request.\n"
+    "- Do not assume hidden information outside the transcript."
+)
+
+
+SUMMARY_SYSTEM_PROMPT = (
+    "You are a summariser. Produce a concise factual summary of the "
+    "conversation excerpt below in at most {max_chars} characters. "
+    "Capture key topics, decisions, named entities, and any context "
+    "later turns might need. Do not invent details. Output ONLY the "
+    "summary text — no preamble, no apologies, no formatting."
+)
+
+
+def format_prompt_for_expert(chat: dict) -> str:
+    """Build the text prompt sent to the expert from the chat's sendable
+    history. Plain 'User:' / 'Agent:' role markers — model-agnostic. The
+    trailing 'Agent: ' primes the model to continue.
+
+    Note: we deliberately do *not* use tokenizer chat templates here because
+    different experts in the network use different tokenizers. Plain text
+    works on all of them; quality is marginally below template-formatted
+    chat but uniform across the network.
+    """
+    parts = [AGENT_SYSTEM_PROMPT, ""]
+    if chat.get("summary"):
+        parts.append("Summary of the chat: " + chat["summary"])
+        parts.append("")
+    for m in chats.history_for_expert(chat):
+        prefix = "User" if m["role"] == "user" else "Agent"
+        parts.append(f"{prefix}: {m['text']}")
+    parts.append("Agent: ")
+    return "\n".join(parts)
 
 
 def set_filter_predicate(fn):
