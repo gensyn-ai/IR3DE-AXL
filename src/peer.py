@@ -1,4 +1,4 @@
-import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit
+import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit, threading
 from copy import deepcopy
 
 import torch
@@ -87,6 +87,8 @@ class Peer:
 
         self.current_chat = chats.new_chat()
         atexit.register(self._save_current_chat_safely)
+        self.tmp_trimmed_pairs = None
+        self.pending_continuation = None
     
     def get_topology(self, session):
         resp = session.get(f"{AXL}{self.peer_id:02d}/topology", timeout=5)
@@ -351,6 +353,49 @@ class Peer:
                                 model_idx=sel[1],
                                 tag=pending.get("tag"),
                             )
+
+                elif msg.get("type") == 'summary-req':
+                    log(f"Received summary request from {sender[:8]}...", self.peer_id, msg_type="summary-req")
+                    sum_prompt = msg.get("message")
+                    max_chars = msg.get("max_chars")
+                    model_idx = msg.get("model_idx")
+                    new_summary = self._summarize(sum_prompt, max_chars, model_idx=model_idx)
+                    msg_id = str(uuid.uuid4())
+                    reply = {
+                        "msg_id":         msg_id,
+                        "orig_msg_id":    msg.get("msg_id"),
+                        "type":           "summary",
+                        "from":           self.public_key,
+                        "to":             msg.get("from"),
+                        "summary":        new_summary
+                    }
+                    self.send(reply, msg.get("from"), timeout=timeout)
+
+                elif msg.get("type") == 'summary':
+                    log(f"Received summary from {sender[:8]}...", self.peer_id, msg_type="summary")
+                    orig = msg.get("orig_msg_id")
+                    pending = self.awaiting_acks.pop(orig, None) if orig else None
+                    if pending is not None:
+                        log(f"Removed message ID {orig[:8]}... from awaiting ACKs.", self.peer_id, msg_type="summary-ack")
+
+                    new_summary = msg.get("summary")
+                    if new_summary:
+                        self._handle_summary(new_summary, self.current_chat, self.tmp_trimmed_pairs)
+                    else:
+                        log("Remote summarization produced an empty result; keeping previous summary.", self.peer_id, msg_type="warning")
+                    self.tmp_trimmed_pairs = None
+
+                    # Fire deferred Part B on a worker thread so recv_loop isn't blocked
+                    # by future.result(...) inside _continue_handle_user_input's local branch.
+                    if self.pending_continuation is not None:
+                        state = self.pending_continuation
+                        self.pending_continuation = None
+                        threading.Thread(
+                            target=self._continue_handle_user_input,
+                            kwargs=state,
+                            daemon=True,
+                            name="continue-user-input",
+                        ).start()
                 
                 elif msg.get("type") in ("greeting", "greeting-ack"):
 
@@ -568,20 +613,39 @@ class Peer:
     def check_acks(self, timeout=30):
         current_time = time.time()
         expired_acks = [msg_id for msg_id, info in self.awaiting_acks.items() if current_time - info['timestamp'] > timeout]
-        
-        for msg_id in expired_acks:
 
+        for msg_id in expired_acks:
             info = self.awaiting_acks[msg_id]
             pk = info['receiver']
-            
+
             if pk in self.known_public_keys:
                 peer_id = self.known_public_keys[pk]['peer_id']
-                log(f"No ACK received from peer {pk[:8]}... with ID {peer_id} for message ID {msg_id[:8]}..., message type {info.get('type', 'unknown')} after {timeout} seconds.", self.peer_id, msg_type="warning")
+                log(f"No ACK received from peer {pk[:8]}... with ID {peer_id} for "
+                    f"message ID {msg_id[:8]}..., message type "
+                    f"{info.get('type', 'unknown')} after {timeout} seconds.",
+                    self.peer_id, msg_type="warning")
             else:
-                log(f"No ACK received from peer {pk[:8]}... with unknown ID, for message ID {msg_id[:8]}..., message type {info.get('type', 'unknown')} after {timeout} seconds.", self.peer_id, msg_type="warning")
-            
+                log(f"No ACK received from peer {pk[:8]}... with unknown ID, for "
+                    f"message ID {msg_id[:8]}..., message type "
+                    f"{info.get('type', 'unknown')} after {timeout} seconds.",
+                    self.peer_id, msg_type="warning")
+
             if info.get('type') == 'text':
                 chats.mark_last_user_failed(self.current_chat)
+
+            elif info.get('type') == 'summary-req':
+                log("Summary request expired; proceeding with trimmed history (no summary).",
+                    self.peer_id, msg_type="warning")
+                self.tmp_trimmed_pairs = None
+                if self.pending_continuation is not None:
+                    state = self.pending_continuation
+                    self.pending_continuation = None
+                    threading.Thread(
+                        target=self._continue_handle_user_input,
+                        kwargs=state,
+                        daemon=True,
+                        name="continue-user-input",
+                    ).start()
 
             del self.awaiting_acks[msg_id]
 
@@ -843,10 +907,20 @@ class Peer:
 
         return (peer_pk, model_idx)
 
+    
     def handle_user_input(self, user_input, timeout=60):
+
+        if self.pending_continuation is not None:
+            log("A previous turn is still waiting for a remote summary. "
+                "Please wait for it to complete before submitting another message.",
+                self.peer_id, msg_type="warning")
+            log("Waiting for previous response to complete...",
+                self.peer_id, msg_type="warning", right=True)
+            return
 
         start_time = time.time()
 
+        # ── Routing (unchanged) ───────────────────────────────────────────
         unique_models = set(self.selected_models.values())
         if len(unique_models) == 1:
             selected_model = next(iter(unique_models))
@@ -870,13 +944,14 @@ class Peer:
             assigned_tag = next(iter(self.selected_models.keys()), "(unrouted)")
 
         else:
-
             out = self.get_token_router()
             if out is None:
-                log("Cannot handle user input because token router could not be constructed.", self.peer_id, msg_type="warning")
-                log("Cannot handle user input. Please select at least one expertise in the Control Panel.", self.peer_id, msg_type="warning", right=True)
+                log("Cannot handle user input because token router could not be constructed.",
+                    self.peer_id, msg_type="warning")
+                log("Cannot handle user input. Please select at least one expertise in the Control Panel.",
+                    self.peer_id, msg_type="warning", right=True)
                 return
-            
+
             assigned_tag = self.find_best_tag(*out, user_input)
             log(f"User input assigned to tag '{assigned_tag}'", self.peer_id, msg_type="ir3de")
 
@@ -889,87 +964,124 @@ class Peer:
 
         tag_for_msg = assigned_tag if assigned_tag and assigned_tag != "(unrouted)" else None
         chats.add_user_message(self.current_chat, user_input)
-        self._ensure_within_budget()
-        prompt = format_prompt_for_expert(self.current_chat)
 
-        if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
+        needs_remote_summary = self._ensure_within_budget(selected_model)
 
-            model_utils = self.models[selected_model[1]]
-            future = self.generation_executor.submit(self.generate_answer, prompt, model_utils, is_local=True)
-
-            try:
-                answer, num_input_tokens, num_output_tokens = future.result(timeout=timeout)
-            except FuturesTimeoutError:
-                err = f"Generation timed out after {timeout}s."
-                log(err, self.peer_id, msg_type="warning")
-                log(err, self.peer_id, msg_type="warning", right=True)
-                chats.mark_last_user_failed(self.current_chat)
-                return
-            except Exception as e:
-                err = f"Generation failed: {e}"
-                log(err, self.peer_id, msg_type="warning")
-                log(err, self.peer_id, msg_type="warning", right=True)
-                chats.mark_last_user_failed(self.current_chat)
-                return
-
-            log(f"Answer processed locally.", self.peer_id, msg_type="text")
-            log(f"{answer}", self.peer_id, msg_type="text", right=True)
-
-            prompt_latency = time.time() - start_time
-            num_total_tokens = num_input_tokens + num_output_tokens
-            latency_per_total = prompt_latency / num_total_tokens
-            latency_per_input = prompt_latency / num_input_tokens
-
-            local_model = self.models[selected_model[1]]
-            local_model.setdefault('latencies', []).append({
-                "prompt_latency":          prompt_latency,
-                "num_input_tokens":        num_input_tokens,
-                "num_output_tokens":       num_output_tokens,
-                "latency_per_total_token": latency_per_total,
-                "latency_per_input_token": latency_per_input,
-            })
-
-            log(f"Prompt latency (local model idx {selected_model[1]}): {prompt_latency:.4f} s "
-                f"[in={num_input_tokens} tok, out={num_output_tokens} tok]",
-                self.peer_id, msg_type="text")
-            log(f"Latency per total token: {latency_per_total*1000:.2f} ms/tok "
-                f"({num_total_tokens} tokens total)", self.peer_id, msg_type="text")
-            log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok",
-                self.peer_id, msg_type="text")
-
-            chats.add_agent_message(
-                self.current_chat,
-                answer,
-                peer_pk=self.public_key,
-                model_idx=selected_model[1],
-                tag=tag_for_msg,
-            )
-
+        if needs_remote_summary:
+            # Stash everything Part B needs. recv_loop's 'summary' branch (or
+            # check_acks on expiry) will spawn a worker thread that calls
+            # _continue_handle_user_input(**state).
+            self.pending_continuation = {
+                "selected_model": selected_model,
+                "assigned_tag":   assigned_tag,
+                "tag_for_msg":    tag_for_msg,
+                "start_time":     start_time,
+                "timeout":        timeout,
+            }
+            log("Waiting for remote summary before generating the answer.",
+                self.peer_id, msg_type="summary")
             return
 
+        # No remote summary needed — run Part B inline on the current thread.
+        self._continue_handle_user_input(
+            selected_model=selected_model,
+            assigned_tag=assigned_tag,
+            tag_for_msg=tag_for_msg,
+            start_time=start_time,
+            timeout=timeout,
+        )
 
-        msg_id = str(uuid.uuid4())
-        msg = {
-            "msg_id":         msg_id,
-            "type":           "text",
-            "from":           self.public_key,
-            "peer_id":        self.peer_id,
-            "peer_name":      self.node_name,
-            "assigned_tag":   assigned_tag,
-            "selected_model": selected_model,
-            "message":        prompt,
-        }
-        self.send(msg, selected_model[0], timeout=timeout)
+    def _continue_handle_user_input(self, selected_model, assigned_tag, tag_for_msg, start_time, timeout=60):
+        """Part B of handle_user_input: build the final prompt and dispatch the
+        user's request to the expert. Invoked either inline by handle_user_input
+        (no remote summary needed / local summary done) or by a worker thread
+        spawned from recv_loop's 'summary' handler / check_acks on summary-req
+        expiry.
+        """
+        try:
+            prompt = format_prompt_for_expert(self.current_chat)
 
-        self.awaiting_acks[msg_id] = {
-            "type":       "text",
-            "model_idx":  selected_model[1],
-            "receiver":   selected_model[0],
-            "tag":        tag_for_msg,
-            "timestamp":  time.time(),
-        }
+            if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
 
-    def generate_answer(self, message, model_utils, is_local=False):
+                model_utils = self.models[selected_model[1]]
+                future = self.generation_executor.submit(self.generate_answer, prompt, model_utils)
+
+                try:
+                    answer, num_input_tokens, num_output_tokens = future.result(timeout=timeout)
+                except FuturesTimeoutError:
+                    err = f"Generation timed out after {timeout}s."
+                    log(err, self.peer_id, msg_type="warning")
+                    log(err, self.peer_id, msg_type="warning", right=True)
+                    chats.mark_last_user_failed(self.current_chat)
+                    return
+                except Exception as e:
+                    err = f"Generation failed: {e}"
+                    log(err, self.peer_id, msg_type="warning")
+                    log(err, self.peer_id, msg_type="warning", right=True)
+                    chats.mark_last_user_failed(self.current_chat)
+                    return
+
+                log(f"Answer processed locally.", self.peer_id, msg_type="text")
+                log(f"{answer}", self.peer_id, msg_type="text", right=True)
+
+                prompt_latency = time.time() - start_time
+                num_total_tokens = num_input_tokens + num_output_tokens
+                latency_per_total = prompt_latency / num_total_tokens
+                latency_per_input = prompt_latency / num_input_tokens
+
+                local_model = self.models[selected_model[1]]
+                local_model.setdefault('latencies', []).append({
+                    "prompt_latency":          prompt_latency,
+                    "num_input_tokens":        num_input_tokens,
+                    "num_output_tokens":       num_output_tokens,
+                    "latency_per_total_token": latency_per_total,
+                    "latency_per_input_token": latency_per_input,
+                })
+
+                log(f"Prompt latency (local model idx {selected_model[1]}): {prompt_latency:.4f} s "
+                    f"[in={num_input_tokens} tok, out={num_output_tokens} tok]",
+                    self.peer_id, msg_type="text")
+                log(f"Latency per total token: {latency_per_total*1000:.2f} ms/tok "
+                    f"({num_total_tokens} tokens total)", self.peer_id, msg_type="text")
+                log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok",
+                    self.peer_id, msg_type="text")
+
+                chats.add_agent_message(
+                    self.current_chat,
+                    answer,
+                    peer_pk=self.public_key,
+                    model_idx=selected_model[1],
+                    tag=tag_for_msg,
+                )
+                return
+
+            # Remote path
+            msg_id = str(uuid.uuid4())
+            msg = {
+                "msg_id":         msg_id,
+                "type":           "text",
+                "from":           self.public_key,
+                "peer_id":        self.peer_id,
+                "peer_name":      self.node_name,
+                "assigned_tag":   assigned_tag,
+                "selected_model": selected_model,
+                "message":        prompt,
+            }
+            self.send(msg, selected_model[0], timeout=timeout)
+
+            self.awaiting_acks[msg_id] = {
+                "type":       "text",
+                "model_idx":  selected_model[1],
+                "receiver":   selected_model[0],
+                "tag":        tag_for_msg,
+                "timestamp":  time.time(),
+            }
+
+        except Exception as e:
+            log(f"Error in _continue_handle_user_input: {e}",
+                self.peer_id, msg_type="warning")
+
+    def generate_answer(self, message, model_utils):
         encoding = model_utils['tokenizer'](message, return_tensors='pt').to(self.device)
         input_ids = encoding['input_ids']
         num_input_tokens = int(input_ids.shape[1])
@@ -1027,28 +1139,7 @@ class Peer:
         chats.save_chat(self.current_chat)
 
 
-    def _summarise_locally(self, existing_summary, trimmed_pairs, max_chars):
-        """Generate a new summary using a local model.
-
-        Inputs:
-        existing_summary  - the chat's current summary (may be None) - folded
-                            into the new one so we don't lose context across
-                            repeated summarisations.
-        trimmed_pairs     - list of (user_msg, agent_msg) dicts just popped
-                            from the front of the chat.
-        max_chars         - upper bound on the returned summary's length.
-
-        Returns the new summary string (truncated to max_chars if the model
-        overshoots), or an empty string if summarisation fails or there's no
-        local model available. Does not mutate self.current_chat.
-        """
-        if not self.models or max_chars < 50:
-            return ""
-
-        # Always use the first local model for summarisation. Keeps the lock-
-        # holding window short and avoids the deadlock we'd get going through
-        # the network for this.
-        model_utils = self.models[0]
+    def _text_to_summarize(self, existing_summary, trimmed_pairs, max_chars):
 
         parts = [SUMMARY_SYSTEM_PROMPT.format(max_chars=max_chars), ""]
         if existing_summary:
@@ -1065,34 +1156,42 @@ class Peer:
         parts.append("Summary:")
         sum_prompt = "\n".join(parts)
 
+        return sum_prompt
+
+
+    def _summarize(self, sum_prompt, max_chars, model_idx=0):
         try:
-            future = self.generation_executor.submit(self.generate_answer, sum_prompt, model_utils, True)
+            future = self.generation_executor.submit(self.generate_answer, sum_prompt, self.models[model_idx])
             summary, _, _ = future.result(timeout=120)
         except Exception as e:
             log(f"Summarisation failed: {e}", self.peer_id, msg_type="warning")
             return ""
-
         return summary.strip()[:max_chars]
 
 
-    def _ensure_within_budget(self):
-        """If the current prompt exceeds self.budget_chars, drop oldest user/
-        agent couples from the front and fold them into the chat's summary
-        until the prompt fits within 80% of the budget (leaving 20% room for
-        the new summary).
+    def _handle_summary(self, new_summary, chat, trimmed_pairs):
+        chats.set_summary(chat, new_summary)
+        log(f"Summary updated ({len(new_summary)} chars covering {len(trimmed_pairs)} dropped pairs).", self.peer_id, msg_type="summary")
 
-        Assumes self.chat_lock is held by the caller. No-op if budget_chars
-        is non-positive.
+    def _ensure_within_budget(self, selected_model, timeout=60) -> bool:
+        """Trim oldest user/agent couples and summarise them via the routed
+        expert if the prompt exceeds self.budget_chars.
+
+        Returns True iff a *remote* summary request was just sent and the caller
+        must defer subsequent work until the summary arrives. Returns False in
+        all other cases (no trim needed, no complete pair to trim, local summary
+        completed inline, remote send failed).
         """
         if self.budget_chars <= 0:
-            return
+            return False
 
         chat = self.current_chat
         current_size = len(format_prompt_for_expert(chat))
         if current_size <= self.budget_chars:
-            return
+            return False
 
-        log(f"Conversation history ({current_size} chars) exceeds budget ({self.budget_chars}). Trimming and summarising.",
+        log(f"Conversation history ({current_size} chars) exceeds budget "
+            f"({self.budget_chars}). Trimming and summarising.",
             self.peer_id, msg_type="summary")
 
         target = int(0.8 * self.budget_chars)
@@ -1100,19 +1199,50 @@ class Peer:
         while len(format_prompt_for_expert(chat)) > target:
             pair = chats.trim_oldest_pair(chat)
             if pair is None:
-                break                                  # nothing left to drop
+                break
             trimmed_pairs.append(pair)
 
         if not trimmed_pairs:
             log("Budget exceeded but no complete (user, agent) couple at the "
                 "head of the history to drop. Sending unchanged.",
                 self.peer_id, msg_type="warning")
-            return
+            return False
 
-        # Whatever room is left between the post-trim prompt and the budget
-        # is what the summary may occupy.
         room = int(0.8 * (self.budget_chars - len(format_prompt_for_expert(chat))))
-        new_summary = self._summarise_locally(chat.get("summary"), trimmed_pairs, room)
-        if new_summary:
-            chats.set_summary(chat, new_summary)
-            log(f"Summary updated ({len(new_summary)} chars covering {len(trimmed_pairs)} dropped pairs).", self.peer_id, msg_type="summary")
+        sum_prompt = self._text_to_summarize(chat.get("summary"), trimmed_pairs, room)
+
+        if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
+            new_summary = self._summarize(sum_prompt, room, model_idx=selected_model[1])
+            if new_summary:
+                self._handle_summary(new_summary, chat, trimmed_pairs)
+            else:
+                log("Local summarization produced an empty result; keeping previous summary.",
+                    self.peer_id, msg_type="warning")
+            return False
+
+        # Remote path
+        self.tmp_trimmed_pairs = trimmed_pairs
+        msg_id = str(uuid.uuid4())
+        msg = {
+            "msg_id":    msg_id,
+            "type":      "summary-req",
+            "from":      self.public_key,
+            "peer_id":   self.peer_id,
+            "peer_name": self.node_name,
+            "model_idx": selected_model[1],
+            "message":   sum_prompt,
+            "max_chars": room,
+        }
+        if not self.send(msg, selected_model[0], timeout=timeout):
+            log("Failed to send summary-req; proceeding with trimmed history (no summary).",
+                self.peer_id, msg_type="warning")
+            self.tmp_trimmed_pairs = None
+            return False
+
+        self.awaiting_acks[msg_id] = {
+            "type":      "summary-req",
+            "model_idx": selected_model[1],
+            "receiver":  selected_model[0],
+            "timestamp": time.time(),
+        }
+        return True
