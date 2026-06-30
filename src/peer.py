@@ -1,6 +1,6 @@
 import atexit
 from copy import deepcopy
-import os, pathlib, subprocess, uuid, requests, json, time, random
+import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit
 
 import torch
 import torch.nn.functional as F
@@ -67,7 +67,9 @@ class Peer:
             ["./scripts/start_node.sh", str(peer_id)],
             stdout=log_fp,
             stderr=subprocess.STDOUT,
+            start_new_session=True,  # own process group, so stop_node() can kill the whole node tree
         )
+        atexit.register(self.stop_node)  # deterministic node cleanup on normal interpreter exit
         sleep_time = 5
         log(f"Waiting {sleep_time} seconds for node {peer_id} to initialize...", peer_id, msg_type=None)
         time.sleep(sleep_time)
@@ -1007,14 +1009,50 @@ class Peer:
         num_output_tokens = int(new_tokens.shape[0])
         return answer, num_input_tokens, num_output_tokens
 
+    def stop_node(self, timeout=5):
+        """Stop the AXL node subprocess deterministically and idempotently.
+
+        SIGTERM the node's process group, wait, then SIGKILL if it's still alive.
+        Group-aware (the node is started with start_new_session=True) with a
+        single-pid fallback. Safe to call multiple times or if the node is already
+        gone. Does not rely on the node handling SIGTERM gracefully — the SIGKILL
+        fallback covers an unresponsive node.
+        """
+        proc = getattr(self, "proc", None)
+        if proc is None or proc.poll() is not None:
+            return
+
+        pid = proc.pid
+
+        def _signal(sig):
+            try:
+                os.killpg(os.getpgid(pid), sig)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    proc.send_signal(sig)
+                except ProcessLookupError:
+                    pass
+
+        _signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=timeout)
+            return
+        except subprocess.TimeoutExpired:
+            log(f"Node {getattr(self, 'peer_id', '?')} did not exit after SIGTERM; sending SIGKILL.",
+                getattr(self, "peer_id", "?"), msg_type="warning")
+
+        _signal(signal.SIGKILL)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+
     def __del__(self):
-       if getattr(self, "proc", None) and self.proc.poll() is None:
-           self.proc.terminate()
-           try: 
-               self.proc.wait(timeout=3)
-           except subprocess.TimeoutExpired:
-               self.proc.kill()
-    
+        try:
+            self.stop_node()
+        except Exception:
+            pass
+          
     def _save_current_chat_safely(self) -> None:
         """Persist the current chat on process exit. Swallows errors so we never
         raise during interpreter shutdown."""

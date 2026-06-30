@@ -1,4 +1,4 @@
-import os, traceback, argparse, threading, time
+import os, sys, signal, traceback, argparse, threading, time
  
 from peer import Peer
 from utils import log, ACTIVATE_UI
@@ -29,9 +29,54 @@ def get_args():
     return parser.parse_args()
  
  
+def _install_node_signal_cleanup(peer):
+    """Headless (main thread): stop the AXL node on SIGTERM/SIGHUP so an
+    externally-killed peer process doesn't leave an orphaned node. The TUI has its
+    own variant (_install_tui_node_cleanup); Ctrl+C is handled separately (headless:
+    KeyboardInterrupt -> run_peer; TUI: action_quit).
+    """
+    def _handler(signum, frame):
+        peer.stop_node()
+        sys.stdout.flush()
+        os._exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError, AttributeError):
+            # Not the main thread, or signal unavailable on this platform.
+            pass
+
+
+def _install_tui_node_cleanup(app):
+    """TUI (main thread): stop the AXL node on SIGTERM/SIGHUP — the catchable exits
+    Textual's Ctrl+C handling doesn't cover. Closing the terminal window or an SSH
+    drop delivers SIGHUP; an external kill/pkill/IDE-stop delivers SIGTERM. Installed
+    before app.run(). Stops the node directly, then asks Textual to exit so the terminal
+    is restored; falls back to SystemExit if app.exit() can't run. The window before
+    app.peer is set is covered by the Peer's atexit (registered when the node spawns).
+    """
+    def _handler(signum, frame):
+        peer = getattr(app, "peer", None)
+        if peer is not None:
+            peer.stop_node()
+        try:
+            app.exit()
+        except Exception:
+            raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError, AttributeError):
+            # Not the main thread, or signal unavailable on this platform.
+            pass
+
+
 def run_peer(app, args):
     """All peer logic runs in this background thread."""
 
+    peer = None
     try:
         if app is not None:
             disable_input(app)
@@ -47,6 +92,8 @@ def run_peer(app, args):
             app.peer = peer
             enable_filters(app)
             enable_input(app, peer.peer_id)
+        else:
+            _install_node_signal_cleanup(peer)
     
         # Log the peer info now that the widget is available
         log(f"Peer {peer.peer_id} - Public Key: {peer.public_key[:8]}..., IPv6: {peer.ipv6_address}", peer.peer_id)
@@ -113,6 +160,11 @@ def run_peer(app, args):
         with open(path, "a") as f:
             traceback.print_exc(file=f)
 
+        # Stop the node directly — App.exit() does not route through action_quit.
+        target_peer = app.peer if app is not None else peer
+        if target_peer is not None:
+            target_peer.stop_node()
+
         if app is not None:
             app.call_from_thread(app.exit)
 
@@ -128,6 +180,7 @@ def main():
 
     if ACTIVATE_UI:
         app = SimApp(args, run_peer, handle_input)
+        _install_tui_node_cleanup(app)   # stop the node on SIGHUP (window close / SSH drop) and SIGTERM
         try:
             app.run()
         except Exception:
@@ -138,10 +191,9 @@ def main():
                 path = f"logs/error_{int(time.time())}.log"
             with open(path, "a") as f:
                 traceback.print_exc(file=f)
-            if app.peer is not None and app.peer.proc is not None:
-                log(f"Terminating peer process (PID: {app.peer.proc.pid})", node_id=app.peer.peer_id)
-                app.peer.proc.terminate()
-                app.peer.proc.wait()
+            if app.peer is not None:
+                log(f"Stopping peer node (PID: {app.peer.proc.pid})", node_id=app.peer.peer_id)
+                app.peer.stop_node()
             raise
     
     else:

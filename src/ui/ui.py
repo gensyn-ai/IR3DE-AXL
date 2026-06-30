@@ -751,10 +751,7 @@ class SimApp(App):
 
     async def action_quit(self):
         if self.peer is not None:
-            self.peer._save_current_chat_safely()
-            if self.peer.proc is not None:
-                self.peer.proc.terminate()
-                self.peer.proc.wait()
+            self.peer.stop_node()
         self.exit()
 
     def on_resize(self, event):
