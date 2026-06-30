@@ -19,7 +19,7 @@ AXL = "http://127.0.0.1:91"
 
 class Peer:
 
-    def __init__(self, peer_id, ir3de_lambda=0.01, ir3de_entropy_top_k=10, max_answer_length=256, num_characters_conversation_history=8000):
+    def __init__(self, peer_id, ir3de_lambda=0.01, ir3de_entropy_top_k=10, max_answer_length=256, num_characters_conversation_history=8000, on_axl_ready=None):
         
         with open(f"ir3de_stats/default_stats.json", "r") as f:
             default_stats = json.load(f)
@@ -42,6 +42,12 @@ class Peer:
         sleep_time = 5
         log(f"Waiting {sleep_time} seconds for node {peer_id} to initialize...", peer_id, msg_type=None)
         time.sleep(sleep_time)
+
+        if on_axl_ready is not None:
+            try:
+                on_axl_ready()
+            except Exception as e:
+                log(f"on_axl_ready callback failed: {e}", peer_id, msg_type="warning")
 
         self.peer_id = peer_id
         self.session = requests.Session()

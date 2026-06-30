@@ -85,13 +85,18 @@ def run_peer(app, args):
         if app is not None:
             disable_input(app)
             disable_filters(app)
+        
+        def _on_axl_ready():
+            if app is not None:
+                app.call_from_thread(app._show_loading_models)
 
         peer = Peer(
             peer_id=args.peer_id,
             ir3de_lambda=args.ir3de_lambda,
             ir3de_entropy_top_k=args.ir3de_entropy_top_k,
             max_answer_length=args.max_answer_length,
-            num_characters_conversation_history=args.num_characters_conversation_history
+            num_characters_conversation_history=args.num_characters_conversation_history,
+            on_axl_ready=_on_axl_ready
         )
         if app is not None:
             app.peer = peer

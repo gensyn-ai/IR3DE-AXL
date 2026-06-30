@@ -481,7 +481,7 @@ class SimApp(App):
         self._show_all_latencies = False
         self._latency_plot_last: tuple | None = None
         self._latency_metric = "prompt"   # one of: 'prompt' | 'total' | 'input'
-        self._loading_label = "Loading local models"
+        self._loading_label = "Initializing AXL backend"
 
     def compose(self) -> ComposeResult:
 
@@ -560,7 +560,7 @@ class SimApp(App):
                 with TabbedContent(id="right-tabs"):
                     with TabPane("...", id="tab-chat-placeholder"):
                         yield Static(DIAMOND_FRAMES[0], id="right-spinner")
-                yield Static("Loading local models", id="loading-msg")
+                yield Static("Initializing AXL backend", id="loading-msg")
                 yield Static("", id="input-divider")
                 with Horizontal(id="input-row"):
                     yield Static("> ", id="prompt")
@@ -1649,6 +1649,16 @@ class SimApp(App):
             chat_id = tab_id[len(prefix):]
             if chat_id in self.peer.chats:
                 self.peer.active_chat_id = chat_id
+
+    def _show_loading_models(self) -> None:
+        """Swap the animated loading message to 'Loading local models' once
+        the AXL backend has finished initialising."""
+        self._loading_label = "Loading local models"
+        try:
+            msg = self.query_one("#loading-msg", Static)
+            msg.update(self._loading_label + "." * self._loading_dots)
+        except Exception:
+            pass
 
     def _show_loading_chats(self) -> None:
         """Swap the animated loading message to 'Loading chats' (used during the
