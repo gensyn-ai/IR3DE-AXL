@@ -3,15 +3,18 @@ from typing import TYPE_CHECKING
 
 from textual.app import App, ComposeResult
 from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable, OptionList, Input
+from textual.widgets._tabs import Tab
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual_plotext import PlotextPlot
 from textual.screen import ModalScreen
 from textual.events import MouseDown, MouseUp, MouseMove
-from rich.text import Text
+from rich.text import Text as RichText
+from rich.markup import escape as _md_escape
 
 from utils import (format_params, format_mean_std, set_log_widget, set_output_widget, log, MSG_TYPE_COLORS,
-                   set_filter_predicate, ipv6_from_pubkey, symbol_for_tag, MAX_TITLE_CHARS, render_chat_history_into)
+                   set_filter_predicate, ipv6_from_pubkey, symbol_for_tag, MAX_TITLE_CHARS, render_chat_history_into,
+                   unset_output_widget)
 from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
 
 if TYPE_CHECKING:
@@ -106,7 +109,7 @@ class ActionChip(Static):
 
     def _refresh_label(self):
         style = f"bold {self.color}" if self.active else self.color
-        self.update(Text(f"[{self.action.upper()}]", style=style))
+        self.update(RichText(f"[{self.action.upper()}]", style=style))
 
     def set_active(self, active: bool):
         if active == self.active:
@@ -135,9 +138,9 @@ class FilterChip(Static):
 
     def _refresh_label(self):
         if self.active:
-            self.update(Text(f"[{self.msg_type.upper()}]", style=f"bold {self.color}"))
+            self.update(RichText(f"[{self.msg_type.upper()}]", style=f"bold {self.color}"))
         else:
-            self.update(Text(f"[{self.msg_type.upper()}]", style=f"dim {self.color}"))
+            self.update(RichText(f"[{self.msg_type.upper()}]", style=f"dim {self.color}"))
 
     def on_click(self, event):
         self.active = not self.active
@@ -163,7 +166,7 @@ class ToggleChip(Static):
 
     def _refresh_label(self):
         style = f"bold {self.color}" if self.active else self.color
-        self.update(Text(f"[{self.label.upper()}]", style=style))
+        self.update(RichText(f"[{self.label.upper()}]", style=style))
 
     def on_click(self, event):
         self.active = not self.active
@@ -213,7 +216,7 @@ class TagButton(Static):
         check = "✓" if self.active else " "
         # Pad symbol to 3 cells so glyphs like "</>" and "λ" line up the same.
         sym = self.symbol.ljust(3)
-        self.update(Text(f" {sym} {self.tag.capitalize():<12} [{check}]"))
+        self.update(RichText(f" {sym} {self.tag.capitalize():<12} [{check}]"))
         if self.active:
             self.add_class("-active")
         else:
@@ -482,6 +485,7 @@ class SimApp(App):
         self._latency_plot_last: tuple | None = None
         self._latency_metric = "prompt"   # one of: 'prompt' | 'total' | 'input'
         self._loading_label = "Initializing AXL backend"
+        self._right_spinner_active = True
 
     def compose(self) -> ComposeResult:
 
@@ -639,7 +643,7 @@ class SimApp(App):
         for col_key, base in columns:
             suffix = f" {arrow}" if col_key == active_key else "  "
             text = f"{base}{suffix}"
-            table.columns[col_key].label = Text(text)
+            table.columns[col_key].label = RichText(text)
         table.refresh()
 
     
@@ -723,7 +727,7 @@ class SimApp(App):
         }
         for col_key, base in labels.items():
             text = f"{base} {arrow}" if col_key == self._sort_column_key else base
-            table.columns[col_key].label = Text(text)
+            table.columns[col_key].label = RichText(text)
         table.refresh()
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
@@ -803,6 +807,30 @@ class SimApp(App):
             self.push_screen(LatencyMetricSelectScreen(), self._on_latency_metric_chosen)
         elif event.control.id == "new-chat-button":
             self._create_new_chat()
+
+        node = event.control
+        tab_widget = None
+        for _ in range(6):
+            if node is None:
+                break
+            if isinstance(node, Tab):
+                tab_widget = node
+                break
+            node = getattr(node, "parent", None)
+
+        if tab_widget is not None:
+            tab_id = tab_widget.id or ""
+            marker = "--content-tab-tab-chat-"
+            if tab_id.startswith(marker):
+                chat_id_from_tab = tab_id[len(marker):]
+                width = tab_widget.size.width
+                # Tab has padding 0 2. Layout is:
+                #   [pad-left(2)] label ("Title  ×") [pad-right(2)]
+                # Treat clicks on the last 3 columns (× + its trailing pad) as close.
+                if event.x >= width - 3:
+                    self._close_chat_tab(chat_id_from_tab)
+                    event.stop()
+                    return
         
         if event.chain == 2:
             node = event.control
@@ -1414,11 +1442,13 @@ class SimApp(App):
             self.query_one(spinner_id, Static).styles.display = "none"
             self.query_one(content_id).styles.display = "block"
 
-
     def _tick_control_spinner(self) -> None:
         self._control_spinner_frame = (self._control_spinner_frame + 1) % len(DIAMOND_ROTATION)
         frame = DIAMOND_FRAMES[DIAMOND_ROTATION[self._control_spinner_frame]]
-        for spinner_id in ("#control-spinner", "#stats-spinner", "#right-spinner"):
+        spinners = ["#control-spinner", "#stats-spinner"]
+        if self._right_spinner_active:
+            spinners.append("#right-spinner")
+        for spinner_id in spinners:
             self.query_one(spinner_id, Static).update(frame)
 
     def _refresh_latency_plot(self):
@@ -1539,17 +1569,16 @@ class SimApp(App):
         self._refresh_latency_plot()
     
     def _refresh_chat_tab_title(self) -> None:
-        """Make every right-pane tab label mirror its chat's title (or 'Chat' if
-        no title has been generated/set yet)."""
         if self.peer is None:
             return
         tabbed = self.query_one("#right-tabs", TabbedContent)
         for chat_id, chat in self.peer.chats.items():
-            label = chat.get("title") or "Chat"
+            title = chat.get("title") or "Chat"
+            new_label = self._make_tab_label(title)
             try:
                 tab = tabbed.get_tab(f"tab-chat-{chat_id}")
-                if str(tab.label) != label:
-                    tab.label = label
+                if str(tab.label) != f"{title}  ×":
+                    tab.label = new_label
             except Exception:
                 continue
 
@@ -1578,36 +1607,47 @@ class SimApp(App):
         log(f"Chat renamed to: '{new_title or '(default)'}'", node_id=self.peer.peer_id, msg_type="text")
     
     async def _populate_chat_tabs(self) -> None:
-
         if self.peer is None:
             return
 
         tabbed = self.query_one("#right-tabs", TabbedContent)
-        await tabbed.remove_pane("tab-chat-placeholder")
+
+        # Nuke the placeholder pane + its Tab in one coordinated step.
+        # clear_panes() awaits both halves internally, unlike remove_pane().
+        await tabbed.clear_panes()
+
+        # Stop the ticker from trying to update the (now-gone) right spinner.
+        self._right_spinner_active = False
+
+        # Guarantee at least one chat exists so we never end up with an empty
+        # TabbedContent (which is what triggers the auto-activate-anything
+        # fallback we just tripped over).
+        if not self.peer.chats:
+            self.peer.new_chat()
 
         for chat_id, chat in self.peer.chats.items():
             self._mount_chat_tab(chat_id, chat)
 
+        if self.peer.active_chat_id is None:
+            self.peer.active_chat_id = next(iter(self.peer.chats), None)
+
         if self.peer.active_chat_id is not None:
-            tabbed.active = f"tab-chat-{self.peer.active_chat_id}"
+            try:
+                tabbed.active = f"tab-chat-{self.peer.active_chat_id}"
+            except Exception:
+                pass
 
         tabs_bar = tabbed.query_one("Tabs")
         tabs_bar.mount(Static("[+]", id="new-chat-button"))
 
     def _mount_chat_tab(self, chat_id: str, chat: dict) -> None:
-        """Create a new TabPane for `chat`, mount it, register its RichLog
-        with utils._output_widgets, and replay the chat's history into it."""
-
         title = chat.get("title") or "Chat"
         pane_id = f"tab-chat-{chat_id}"
 
-        pane = TabPane(title, id=pane_id)
-        # Add the pane and its RichLog
+        pane = TabPane(self._make_tab_label(title), id=pane_id)
         tabbed = self.query_one("#right-tabs", TabbedContent)
         tabbed.add_pane(pane)
-        output = RichLog(id=f"output-{chat_id}", classes="chat-output",
-                        highlight=False, markup=False,
-                        auto_scroll=True, wrap=True)
+        output = RichLog(id=f"output-{chat_id}", classes="chat-output", highlight=False, markup=False, auto_scroll=True, wrap=True)
         pane.mount(output)
 
         set_output_widget(chat_id, output)
@@ -1643,22 +1683,98 @@ class SimApp(App):
         msg.update(self._loading_label + "." * self._loading_dots)
     
     def _create_new_chat(self) -> None:
-        """Create a new empty chat and activate it, unless there's already an
-        empty chat (no messages) — in that case just switch to it."""
+        """Create or reopen an empty chat. Precedence:
+        1. An empty chat that's already an open tab -> switch to it.
+        2. An empty chat known to the peer but currently closed -> mount
+            its tab and activate. This is the case that used to leak
+            duplicate empty chats onto disk.
+        3. No empty chat exists at all -> create a fresh one."""
         if self.peer is None:
             return
 
         tabbed = self.query_one("#right-tabs", TabbedContent)
 
-        # If any existing chat has no messages, just jump to it instead of
-        # creating another empty one.
-        for existing_id, existing_chat in self.peer.chats.items():
-            if not existing_chat.get("messages"):
-                tabbed.active = f"tab-chat-{existing_id}"
+        # Which chats currently have tabs open? Derived from the DOM so we
+        # don't need a second source of truth.
+        open_ids: set[str] = set()
+        for pane in tabbed.query(TabPane):
+            pane_id = pane.id or ""
+            if pane_id.startswith("tab-chat-"):
+                open_ids.add(pane_id[len("tab-chat-"):])
+
+        # 1. Open empty tab -> just switch.
+        for chat_id, chat in self.peer.chats.items():
+            if chat_id in open_ids and not chat.get("messages"):
+                tabbed.active = f"tab-chat-{chat_id}"
                 return
 
+        # 2. Closed (in peer.chats but no tab) empty chat -> reopen it.
+        for chat_id, chat in self.peer.chats.items():
+            if chat_id not in open_ids and not chat.get("messages"):
+                self._mount_chat_tab(chat_id, chat)
+                self.peer.active_chat_id = chat_id
+                tabbed.active = f"tab-chat-{chat_id}"
+                return
+
+        # 3. Nothing to reuse — create a fresh chat.
         chat_id = self.peer.new_chat()
         chat = self.peer.chats[chat_id]
         self._mount_chat_tab(chat_id, chat)
-
         tabbed.active = f"tab-chat-{chat_id}"
+
+    def _close_chat_tab(self, chat_id: str) -> None:
+        if self.peer is None or chat_id not in self.peer.chats:
+            return
+
+        chat = self.peer.chats[chat_id]
+        is_empty = not chat.get("messages")
+
+        tabbed = self.query_one("#right-tabs", TabbedContent)
+        was_active = tabbed.active == f"tab-chat-{chat_id}"
+
+        # Ordered list of currently-open chat ids (from the DOM).
+        open_chat_ids: list[str] = []
+        for pane in tabbed.query(TabPane):
+            pane_id = pane.id or ""
+            if pane_id.startswith("tab-chat-"):
+                open_chat_ids.append(pane_id[len("tab-chat-"):])
+
+        if chat_id not in open_chat_ids:
+            return
+
+        is_only_open = len(open_chat_ids) == 1
+
+        # Case B: sole, active, empty chat — closing would just recreate it.
+        if is_empty and is_only_open and was_active:
+            return
+
+        idx = open_chat_ids.index(chat_id)
+        next_active_id = None
+        if idx > 0:
+            next_active_id = open_chat_ids[idx - 1]
+        elif idx + 1 < len(open_chat_ids):
+            next_active_id = open_chat_ids[idx + 1]
+
+        if was_active and next_active_id is not None:
+            try:
+                tabbed.active = f"tab-chat-{next_active_id}"
+            except Exception:
+                pass
+
+        self.peer.close_chat(chat_id)
+        unset_output_widget(chat_id)
+        tabbed.remove_pane(f"tab-chat-{chat_id}")
+        
+
+        if next_active_id is not None:
+            self.peer.active_chat_id = next_active_id
+        else:
+            self.peer.active_chat_id = None
+            self._create_new_chat()
+    
+    def _make_tab_label(self, title: str) -> str:
+        """Tab label as a markup string. The trailing '×' is forced to grey via
+        inline colour markup, so it stays grey even when Tab.-active repaints
+        the rest of the label blue. Bold weight in :hover / .-active states is
+        inherited automatically."""
+        return f"{_md_escape(title)}  [#888888]×[/]"

@@ -1403,3 +1403,18 @@ class Peer:
         single-chat API. Resolves to the active chat. Remove when step 5.b
         finishes wiring the UI to address chats by id."""
         return self.get_active_chat()
+
+    def close_chat(self, chat_id: str) -> None:
+        """Mark a chat as closed (i.e., no longer displayed as a tab). The
+        chat stays in self.chats so it can be reopened later without hitting
+        disk again. Flushes to disk defensively in case of crash. Active-chat
+        bookkeeping is the caller's responsibility."""
+        if chat_id not in self.chats:
+            return
+        try:
+            import chats as chats_module
+            chats_module.save_chat(self.chats[chat_id])
+        except Exception:
+            pass
+        if self.active_chat_id == chat_id:
+            self.active_chat_id = None

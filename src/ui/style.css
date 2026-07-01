@@ -556,3 +556,7 @@ ChatTitleRenameScreen {
 #new-chat-button:hover {
     background: #333333;
 }
+
+#right-tabs Tab:hover {
+    text-style: bold;
+}
