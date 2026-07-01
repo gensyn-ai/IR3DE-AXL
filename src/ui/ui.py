@@ -801,6 +801,8 @@ class SimApp(App):
             self.query_one("#user-input", SubmittableTextArea).submit()
         elif event.control.id == "latency-metric-button":
             self.push_screen(LatencyMetricSelectScreen(), self._on_latency_metric_chosen)
+        elif event.control.id == "new-chat-button":
+            self._create_new_chat()
         
         if event.chain == 2:
             node = event.control
@@ -1389,22 +1391,16 @@ class SimApp(App):
     def _tick_loading_msg(self) -> None:
         """Cycle the loading message between 0 and 3 trailing dots."""
         self._loading_dots = (self._loading_dots + 1) % 4
-        try:
-            msg = self.query_one("#loading-msg", Static)
-            msg.update(self._loading_label + "." * self._loading_dots)
-        except Exception:
-            pass
+        msg = self.query_one("#loading-msg", Static)
+        msg.update(self._loading_label + "." * self._loading_dots)
 
     def _hide_loading_msg(self) -> None:
         # Chat tab loading line (existing)
         if self._loading_timer is not None:
             self._loading_timer.stop()
             self._loading_timer = None
-        try:
-            msg = self.query_one("#loading-msg", Static)
-            msg.styles.display = "none"
-        except Exception:
-            pass
+        msg = self.query_one("#loading-msg", Static)
+        msg.styles.display = "none"
 
         # Stop the shared spinner timer
         if self._control_spinner_timer is not None:
@@ -1415,23 +1411,15 @@ class SimApp(App):
             ("#control-spinner", "#control-scroll"),
             ("#stats-spinner",   "#stats-scroll"),
         ):
-            try:
-                self.query_one(spinner_id, Static).styles.display = "none"
-            except Exception:
-                pass
-            try:
-                self.query_one(content_id).styles.display = "block"
-            except Exception:
-                pass
+            self.query_one(spinner_id, Static).styles.display = "none"
+            self.query_one(content_id).styles.display = "block"
+
 
     def _tick_control_spinner(self) -> None:
         self._control_spinner_frame = (self._control_spinner_frame + 1) % len(DIAMOND_ROTATION)
         frame = DIAMOND_FRAMES[DIAMOND_ROTATION[self._control_spinner_frame]]
         for spinner_id in ("#control-spinner", "#stats-spinner", "#right-spinner"):
-            try:
-                self.query_one(spinner_id, Static).update(frame)
-            except Exception:
-                pass
+            self.query_one(spinner_id, Static).update(frame)
 
     def _refresh_latency_plot(self):
         if self.peer is None:
@@ -1589,32 +1577,22 @@ class SimApp(App):
         self._refresh_chat_tab_title()
         log(f"Chat renamed to: '{new_title or '(default)'}'", node_id=self.peer.peer_id, msg_type="text")
     
-    def _populate_chat_tabs(self) -> None:
-        """Called from run_peer once `app.peer` is set. Replaces the placeholder
-        tab with one TabPane per loaded chat, replays each chat's history into
-        its widget, and activates the chat that peer.active_chat_id points to."""
+    async def _populate_chat_tabs(self) -> None:
+
         if self.peer is None:
             return
 
         tabbed = self.query_one("#right-tabs", TabbedContent)
+        await tabbed.remove_pane("tab-chat-placeholder")
 
-        # Remove the placeholder (if it's still there)
-        try:
-            tabbed.remove_pane("tab-chat-placeholder")
-        except Exception:
-            pass
-
-        # Add a TabPane for each chat
         for chat_id, chat in self.peer.chats.items():
             self._mount_chat_tab(chat_id, chat)
 
-        # Activate the chat the peer thinks is active
         if self.peer.active_chat_id is not None:
-            try:
-                tabbed.active = f"tab-chat-{self.peer.active_chat_id}"
-            except Exception:
-                pass
+            tabbed.active = f"tab-chat-{self.peer.active_chat_id}"
 
+        tabs_bar = tabbed.query_one("Tabs")
+        tabs_bar.mount(Static("[+]", id="new-chat-button"))
 
     def _mount_chat_tab(self, chat_id: str, chat: dict) -> None:
         """Create a new TabPane for `chat`, mount it, register its RichLog
@@ -1654,18 +1632,33 @@ class SimApp(App):
         """Swap the animated loading message to 'Loading local models' once
         the AXL backend has finished initialising."""
         self._loading_label = "Loading local models"
-        try:
-            msg = self.query_one("#loading-msg", Static)
-            msg.update(self._loading_label + "." * self._loading_dots)
-        except Exception:
-            pass
+        msg = self.query_one("#loading-msg", Static)
+        msg.update(self._loading_label + "." * self._loading_dots)
 
     def _show_loading_chats(self) -> None:
         """Swap the animated loading message to 'Loading chats' (used during the
         brief window between models being loaded and chat tabs being populated)."""
         self._loading_label = "Loading chats"
-        try:
-            msg = self.query_one("#loading-msg", Static)
-            msg.update(self._loading_label + "." * self._loading_dots)
-        except Exception:
-            pass
+        msg = self.query_one("#loading-msg", Static)
+        msg.update(self._loading_label + "." * self._loading_dots)
+    
+    def _create_new_chat(self) -> None:
+        """Create a new empty chat and activate it, unless there's already an
+        empty chat (no messages) — in that case just switch to it."""
+        if self.peer is None:
+            return
+
+        tabbed = self.query_one("#right-tabs", TabbedContent)
+
+        # If any existing chat has no messages, just jump to it instead of
+        # creating another empty one.
+        for existing_id, existing_chat in self.peer.chats.items():
+            if not existing_chat.get("messages"):
+                tabbed.active = f"tab-chat-{existing_id}"
+                return
+
+        chat_id = self.peer.new_chat()
+        chat = self.peer.chats[chat_id]
+        self._mount_chat_tab(chat_id, chat)
+
+        tabbed.active = f"tab-chat-{chat_id}"

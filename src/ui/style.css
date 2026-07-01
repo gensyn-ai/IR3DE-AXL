@@ -53,7 +53,7 @@ Horizontal {
 #user-input {
     width: 1fr;
     height: auto;
-    max-height: 8;        /* cap so it can't eat the whole pane */
+    max-height: 8;
     border: none;
     padding: 0;
 }
@@ -68,7 +68,7 @@ Horizontal {
     height: 5;
     width: 100%;
     content-align: center top;
-    color: #ffffff;
+    color: #fad7d1;
 }
 
 #logs-header {
@@ -536,4 +536,23 @@ ChatTitleRenameScreen {
     scrollbar-color: #1c9800;
     scrollbar-color-active: #126900;
     scrollbar-color-hover: #11ff00;
+}
+
+#right-tabs Tabs {
+    layers: base overlay;
+}
+
+#new-chat-button {
+    layer: overlay;
+    dock: right;
+    width: auto;
+    height: 1;
+    padding: 0 1;
+    color: #237dfa;
+    text-style: bold;
+    background: transparent;
+}
+
+#new-chat-button:hover {
+    background: #333333;
 }
