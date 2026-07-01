@@ -1,5 +1,6 @@
 import os, random, threading, statistics
 from typing import TYPE_CHECKING
+from datetime import datetime, timezone
 
 from textual.app import App, ComposeResult
 from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable, OptionList, Input
@@ -12,6 +13,7 @@ from textual.events import MouseDown, MouseUp, MouseMove
 from rich.text import Text as RichText
 from rich.markup import escape as _md_escape
 
+import chats
 from utils import (format_params, format_mean_std, set_log_widget, set_output_widget, log, MSG_TYPE_COLORS,
                    set_filter_predicate, ipv6_from_pubkey, symbol_for_tag, MAX_TITLE_CHARS, render_chat_history_into,
                    unset_output_widget)
@@ -456,6 +458,34 @@ class ChatTitleRenameScreen(ModalScreen):
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+
+class ChatMenuScreen(ModalScreen[str]):
+    """Popup listing closed, non-empty chats. Dismisses with the chosen
+    chat_id, or None if cancelled."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, entries: list[tuple[str, str]], **kwargs):
+        # entries: (chat_id, display_label) sorted most-recent-first.
+        super().__init__(**kwargs)
+        self._entries = entries
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="chat-menu-dialog"):
+            yield Static("Open chat", id="chat-menu-title")
+            if not self._entries:
+                yield Static("No closed chats to reopen.", id="chat-menu-empty")
+            else:
+                yield OptionList(*[label for _, label in self._entries], id="chat-menu-options")
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        chat_id = self._entries[event.option_index][0]
+        self.dismiss(chat_id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class SimApp(App):
     CSS = read_css()
     BINDINGS = [("ctrl+c", "quit", "Quit")]
@@ -807,6 +837,8 @@ class SimApp(App):
             self.push_screen(LatencyMetricSelectScreen(), self._on_latency_metric_chosen)
         elif event.control.id == "new-chat-button":
             self._create_new_chat()
+        elif event.control.id == "chat-menu-button":
+            self._open_chat_menu()
 
         node = event.control
         tab_widget = None
@@ -1611,36 +1643,46 @@ class SimApp(App):
             return
 
         tabbed = self.query_one("#right-tabs", TabbedContent)
-
-        # Nuke the placeholder pane + its Tab in one coordinated step.
-        # clear_panes() awaits both halves internally, unlike remove_pane().
         await tabbed.clear_panes()
-
-        # Stop the ticker from trying to update the (now-gone) right spinner.
         self._right_spinner_active = False
 
-        # Guarantee at least one chat exists so we never end up with an empty
-        # TabbedContent (which is what triggers the auto-activate-anything
-        # fallback we just tripped over).
-        if not self.peer.chats:
-            self.peer.new_chat()
-
-        for chat_id, chat in self.peer.chats.items():
+        # 1. Restore chats that were open last session. Sorted by updated_at
+        #    ascending so the most-recently-touched ones end up rightmost —
+        #    the natural place to look for the tab you just left.
+        previously_open = [
+            (cid, c) for cid, c in self.peer.chats.items()
+            if c.get("open_in_ui") and c.get("messages")
+        ]
+        previously_open.sort(key=lambda x: x[1].get("updated_at", ""))
+        for chat_id, chat in previously_open:
             self._mount_chat_tab(chat_id, chat)
 
-        if self.peer.active_chat_id is None:
-            self.peer.active_chat_id = next(iter(self.peer.chats), None)
+        # 2. Always start on a fresh empty chat, and make it the active tab.
+        #    Reuse any stale empty already in memory if one somehow exists.
+        empty_id = None
+        for cid, c in self.peer.chats.items():
+            if not c.get("messages"):
+                empty_id = cid
+                break
+        if empty_id is None:
+            empty_id = self.peer.new_chat()
 
-        if self.peer.active_chat_id is not None:
-            try:
-                tabbed.active = f"tab-chat-{self.peer.active_chat_id}"
-            except Exception:
-                pass
+        self._mount_chat_tab(empty_id, self.peer.chats[empty_id])
+        self.peer.active_chat_id = empty_id
+        tabbed.active = f"tab-chat-{empty_id}"
 
+        # 3. Mount the [+] / ☰ buttons pair.
         tabs_bar = tabbed.query_one("Tabs")
-        tabs_bar.mount(Static("[+]", id="new-chat-button"))
+        tabs_bar.mount(
+            Horizontal(
+                Static("[+]", id="new-chat-button"),
+                Static("☰", id="chat-menu-button"),
+                id="tab-buttons",
+            )
+        )
 
     def _mount_chat_tab(self, chat_id: str, chat: dict) -> None:
+        chats.set_ui_open(chat, True)
         title = chat.get("title") or "Chat"
         pane_id = f"tab-chat-{chat_id}"
 
@@ -1778,3 +1820,64 @@ class SimApp(App):
         the rest of the label blue. Bold weight in :hover / .-active states is
         inherited automatically."""
         return f"{_md_escape(title)}  [#888888]×[/]"
+
+    def _open_chat_menu(self) -> None:
+        """Show a modal with every non-empty chat for this peer (open and
+        closed), sorted by updated_at descending."""
+        if self.peer is None:
+            return
+
+        candidates: list[tuple[str, dict]] = []
+        for chat_id, chat in self.peer.chats.items():
+            if not chat.get("messages"):
+                continue      # skip empties — at most one, always reachable via [+]
+            candidates.append((chat_id, chat))
+
+        candidates.sort(key=lambda x: x[1].get("updated_at", ""), reverse=True)
+
+        entries: list[tuple[str, str]] = []
+        for chat_id, chat in candidates:
+            title = chat.get("title") or "Chat"
+            ts = self._format_relative_time(chat.get("updated_at", ""))
+            display = f"{title:<40} {ts}"
+            entries.append((chat_id, display))
+
+        self.push_screen(ChatMenuScreen(entries), self._on_chat_menu_selected)
+
+    def _on_chat_menu_selected(self, chat_id) -> None:
+        """Reopen the selected chat as a new tab and activate it."""
+        if chat_id is None or self.peer is None or chat_id not in self.peer.chats:
+            return
+        tabbed = self.query_one("#right-tabs", TabbedContent)
+        pane_id = f"tab-chat-{chat_id}"
+        try:
+            tabbed.get_pane(pane_id)
+            # Already open — just activate.
+        except Exception:
+            self._mount_chat_tab(chat_id, self.peer.chats[chat_id])
+        tabbed.active = pane_id
+        self.peer.active_chat_id = chat_id
+
+    def _format_relative_time(self, iso_ts: str) -> str:
+        if not iso_ts:
+            return ""
+        try:
+            ts = datetime.fromisoformat(iso_ts)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            seconds = int((datetime.now(timezone.utc) - ts).total_seconds())
+        except Exception:
+            return ""
+        if seconds < 60:
+            return "just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h ago"
+        days = hours // 24
+        if days < 30:
+            return f"{days}d ago"
+        months = days // 30
+        return f"{months}mo ago"

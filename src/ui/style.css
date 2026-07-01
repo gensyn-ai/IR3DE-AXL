@@ -542,9 +542,19 @@ ChatTitleRenameScreen {
     layers: base overlay;
 }
 
-#new-chat-button {
+#right-tabs Tab:hover {
+    text-style: bold;
+}
+
+#tab-buttons {
     layer: overlay;
     dock: right;
+    width: auto;
+    height: 1;
+    background: transparent;
+}
+
+#chat-menu-button, #new-chat-button {
     width: auto;
     height: 1;
     padding: 0 1;
@@ -553,10 +563,47 @@ ChatTitleRenameScreen {
     background: transparent;
 }
 
-#new-chat-button:hover {
+#chat-menu-button {
+    padding: 0 2;
+    text-style: bold;
+}
+
+#chat-menu-button:hover, #new-chat-button:hover {
     background: #333333;
 }
 
-#right-tabs Tab:hover {
+ChatMenuScreen {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.4);
+}
+
+#chat-menu-dialog {
+    width: 60;
+    max-height: 24;
+    background: #1a1a1a;
+    border: round #237dfa;
+    padding: 1 1;
+}
+
+#chat-menu-title {
+    width: 100%;
+    color: #237dfa;
     text-style: bold;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#chat-menu-options {
+    width: 100%;
+    height: auto;
+    max-height: 20;
+    background: transparent;
+    border: none;
+}
+
+#chat-menu-empty {
+    width: 100%;
+    color: #888888;
+    padding: 0 1;
+    text-align: center;
 }

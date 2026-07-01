@@ -22,6 +22,7 @@ A chat is a plain dict matching this shape:
         },
         ...
       ]
+      "open_in_ui": bool,            # whether the UI should open this chat on next launch
     }
 
 The on-wire history that gets sent to an expert is a *filtered* projection of
@@ -68,6 +69,7 @@ def new_chat(peer_name: str | None = None) -> dict:
         "summary":    None,
         "peer_name":  peer_name,
         "messages":   [],
+        "open_in_ui": False,
     }
 
 
@@ -212,3 +214,7 @@ def list_chats() -> list[dict]:
         })
     out.sort(key=lambda c: c["updated_at"], reverse=True)
     return out
+
+def set_ui_open(chat: dict, open_: bool) -> None:
+    """Mark whether the chat is currently mounted as a tab."""
+    chat["open_in_ui"] = bool(open_)

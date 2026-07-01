@@ -1,3 +1,4 @@
+import gc
 import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit, threading
 from copy import deepcopy
 
@@ -162,12 +163,22 @@ class Peer:
         return models
 
     def get_stats_info(self):
+        
         all_stats = []
+        
         for i, stats in enumerate(self.stats_info):
+            
             stats_data = torch.load(stats["path"], map_location='cpu')
+            
             tokenizer = AutoTokenizer.from_pretrained(stats_data["tokenizer"])
             model = AutoModelForCausalLM.from_pretrained(stats_data["embedder"])
             embedder = deepcopy(model.model.embed_tokens).to(torch.float32)
+
+            del model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
             self.stats_info[i]['tokenizer_name'] = stats_data["tokenizer"]
             self.stats_info[i]['embedder_name'] = stats_data["embedder"]
             A = stats_data["A"]
@@ -181,9 +192,11 @@ class Peer:
                 "datasets": stats_data["datasets_names"],
                 "owner_public_key": self.public_key
             })
+            
             for tag in stats_data["domain_tags"]:
                 if tag not in self.known_tags:
                     self.known_tags.append(tag)
+
         return all_stats
 
     def send(self, message, peer_public_key, timeout=5, large=False):
@@ -1217,9 +1230,17 @@ class Peer:
             pass
           
     def _save_all_chats_safely(self) -> None:
-        """Persist every in-memory chat on process exit."""
+        """Persist every non-empty in-memory chat on process exit. Empty
+        chats are never persisted — their disk files are removed if they
+        were left over from before this policy was in place."""
         for chat in list(self.chats.values()):
-            chats.save_chat(chat)
+            chat_id = chat.get("chat_id")
+            if not chat_id:
+                continue
+            if chat.get("messages"):
+                chats.save_chat(chat)
+            else:
+                chats.delete_chat(chat_id)
 
     def _text_to_summarize(self, existing_summary, trimmed_pairs, max_chars):
 
@@ -1407,14 +1428,17 @@ class Peer:
     def close_chat(self, chat_id: str) -> None:
         """Mark a chat as closed (i.e., no longer displayed as a tab). The
         chat stays in self.chats so it can be reopened later without hitting
-        disk again. Flushes to disk defensively in case of crash. Active-chat
-        bookkeeping is the caller's responsibility."""
+        disk again. Non-empty chats are flushed defensively; empty chats are
+        never persisted (and are removed from disk if they were previously
+        saved)."""
         if chat_id not in self.chats:
             return
-        try:
-            import chats as chats_module
-            chats_module.save_chat(self.chats[chat_id])
-        except Exception:
-            pass
+        chat = self.chats[chat_id]
+        chats.set_ui_open(chat, False)
+        if chat.get("messages"):
+            chats.save_chat(chat)
+        else:
+            chats.delete_chat(chat_id)
+
         if self.active_chat_id == chat_id:
             self.active_chat_id = None
