@@ -15,7 +15,7 @@ from rich.markup import escape as _md_escape
 import chats
 from utils import (format_params, format_mean_std, set_log_widget, set_output_widget, log, MSG_TYPE_COLORS,
                    set_filter_predicate, ipv6_from_pubkey, symbol_for_tag, MAX_TITLE_CHARS, render_chat_history_into,
-                   unset_output_widget)
+                   unset_output_widget, iter_log_buffer)
 from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
 from peer import Peer
 
@@ -785,7 +785,6 @@ class SimApp(App):
         self._rerender_logs()
 
     def _rerender_logs(self):
-        from utils import iter_log_buffer
         widget = self.query_one("#logs", FollowTailLog)
         widget.clear()
         for ts, node, mtype, line in iter_log_buffer():
@@ -1626,7 +1625,6 @@ class SimApp(App):
         chat = self.peer.current_chat
         if chat is None:
             return
-        import chats
         new_title = (new_title or "").strip()[:MAX_TITLE_CHARS]
         if new_title:
             chats.set_title(chat, new_title)
@@ -1643,19 +1641,18 @@ class SimApp(App):
         self._right_spinner_active = False
         await tabbed.clear_panes()
 
-        # 1. Restore chats that were open last session. Sorted by updated_at
-        #    ascending so the most-recently-touched ones end up rightmost —
-        #    the natural place to look for the tab you just left.
+        # 1. Restore previously-open chats, oldest-updated first so the most
+        #    recent ends up rightmost. Await each mount so TabbedContent's
+        #    tab index is fully populated when we later set `active`.
         previously_open = [
             (cid, c) for cid, c in self.peer.chats.items()
             if c.get("open_in_ui") and c.get("messages")
         ]
         previously_open.sort(key=lambda x: x[1].get("updated_at", ""))
         for chat_id, chat in previously_open:
-            self._mount_chat_tab(chat_id, chat)
+            await self._mount_chat_tab(chat_id, chat)
 
-        # 2. Always start on a fresh empty chat, and make it the active tab.
-        #    Reuse any stale empty already in memory if one somehow exists.
+        # 2. Mount a fresh empty chat rightmost and make it the active tab.
         empty_id = None
         for cid, c in self.peer.chats.items():
             if not c.get("messages"):
@@ -1664,7 +1661,7 @@ class SimApp(App):
         if empty_id is None:
             empty_id = self.peer.new_chat()
 
-        self._mount_chat_tab(empty_id, self.peer.chats[empty_id])
+        await self._mount_chat_tab(empty_id, self.peer.chats[empty_id])
         self.peer.active_chat_id = empty_id
         tabbed.active = f"tab-chat-{empty_id}"
 
@@ -1678,19 +1675,25 @@ class SimApp(App):
             )
         )
 
-    def _mount_chat_tab(self, chat_id: str, chat: dict) -> None:
+    def _mount_chat_tab(self, chat_id: str, chat: dict):
+        """Mount a chat's TabPane and its RichLog. Returns the AwaitComplete
+        from TabbedContent.add_pane so async callers can await pane
+        registration before referencing it (e.g. before setting
+        TabbedContent.active). Sync callers can ignore the return value."""
+
         chats.set_ui_open(chat, True)
         title = chat.get("title") or "Chat"
         pane_id = f"tab-chat-{chat_id}"
 
         pane = TabPane(self._make_tab_label(title), id=pane_id)
         tabbed = self.query_one("#right-tabs", TabbedContent)
-        tabbed.add_pane(pane)
+        add_result = tabbed.add_pane(pane)
+
         output = RichLog(id=f"output-{chat_id}", classes="chat-output", highlight=False, markup=False, auto_scroll=True, wrap=True)
         pane.mount(output)
-
         set_output_widget(chat_id, output)
         render_chat_history_into(chat, output)
+        return add_result
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         """When the user switches tabs, update which chat new submissions go to."""

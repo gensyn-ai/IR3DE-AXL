@@ -1,14 +1,19 @@
-"""On-disk chat storage and in-memory manipulation helpers.
+"""
+On-disk chat storage and in-memory manipulation helpers.
 
 A chat is a plain dict matching this shape:
 
     {
-      "chat_id":     str,            # e.g. "1719673205-3f4a9b21"
-      "title":       str | None,     # set after first answer (round 1)
-      "created_at":  str,            # ISO 8601 UTC
-      "updated_at":  str,            # ISO 8601 UTC, bumped on every mutation
-      "summary":     str | None,     # populated once summarisation kicks in
-      "messages": [
+      "chat_id":             str,
+      "title":               str | None,
+      "created_at":          str,
+      "updated_at":          str,
+      "summary":             str | None,
+      "history_start_index": int,       # messages[:history_start_index] are covered by 'summary'
+      "peer_name":           str | None,
+      "open_in_ui":          bool,
+      "messages":            [
+      
         {
           "role":   "user" | "agent",
           "text":   str,
@@ -21,14 +26,13 @@ A chat is a plain dict matching this shape:
           } | None,
         },
         ...
-      ]
-      "open_in_ui": bool,            # whether the UI should open this chat on next launch
+      ],
     }
 
 The on-wire history that gets sent to an expert is a *filtered* projection of
-`messages` — see `history_for_expert`. Persisted state intentionally keeps
-failed turns (so the UI can render the 'failed' marker) but they're excluded
-from what the expert sees on subsequent rounds.
+`messages` starting at `history_start_index` — see `history_for_expert`. The UI
+still renders the full `messages` list; the index is purely a pointer for the
+LLM-facing slice, so nothing ever disappears from the persisted transcript.
 """
 
 import json
@@ -58,18 +62,20 @@ def chat_path(chat_id: str) -> Path:
 
 # ───────────────────────── constructors ─────────────────────────
 
+
 def new_chat(peer_name: str | None = None) -> dict:
     """Build a fresh empty chat. Caller is responsible for persisting it."""
     now = _now_iso()
     return {
-        "chat_id":    _new_chat_id(),
-        "title":      None,
-        "created_at": now,
-        "updated_at": now,
-        "summary":    None,
-        "peer_name":  peer_name,
-        "messages":   [],
-        "open_in_ui": False,
+        "chat_id":             _new_chat_id(),
+        "title":               None,
+        "created_at":          now,
+        "updated_at":          now,
+        "summary":             None,
+        "history_start_index": 0,
+        "peer_name":           peer_name,
+        "open_in_ui":          False,
+        "messages":            [],
     }
 
 
@@ -135,29 +141,38 @@ def set_summary(chat: dict, summary: str | None) -> None:
 
 
 def trim_oldest_pair(chat: dict) -> tuple[dict, dict] | None:
-    """Pop the oldest (user, agent) couple from the front of messages, skipping
-    leading failed turns. Returns the removed pair, or None if there isn't
-    a complete couple at the head. Callers use this when building the
-    summarisation input — see step 3 of the implementation plan."""
+    """Advance the summarisation boundary past the next (user, agent) couple
+    in the live history. Returns the pair (still present in chat['messages'])
+    so the caller can feed it into the summariser, or None if there isn't a
+    complete couple at the head of the live slice yet.
+
+    Unlike the old behaviour, this does NOT mutate chat['messages']. The
+    couple stays in the persisted transcript so the UI can keep rendering
+    the full history; only the LLM-facing view (see history_for_expert)
+    shrinks."""
     msgs = chat["messages"]
-    # Find first 'ok' user followed by an 'ok' agent
-    for i in range(len(msgs) - 1):
+    start = chat.get("history_start_index", 0)
+    i = start
+    while i < len(msgs) - 1:
         if (msgs[i]["role"] == "user" and msgs[i].get("status", "ok") == "ok"
-                and msgs[i+1]["role"] == "agent"):
-            user_msg = msgs.pop(i)
-            agent_msg = msgs.pop(i)        # now at the same index after first pop
+                and msgs[i + 1]["role"] == "agent"):
+            chat["history_start_index"] = i + 2
             chat["updated_at"] = _now_iso()
-            return user_msg, agent_msg
+            return msgs[i], msgs[i + 1]
+        i += 1
     return None
 
 
 # ───────────────────────── projections ─────────────────────────
 
 def history_for_expert(chat: dict) -> list[dict]:
-    """The slice of messages that should be sent to the expert on the next turn:
-    all 'ok' messages, in order. Failed user turns are excluded so the agent
-    reasons about a clean transcript with no gaps."""
-    return [m for m in chat["messages"] if m.get("status", "ok") == "ok"]
+    """The slice of messages sent to the expert on the next turn: all 'ok'
+    messages from history_start_index onward. Earlier turns are folded into
+    chat['summary']; failed user turns anywhere in the live slice are
+    excluded so the transcript has no gaps."""
+    msgs = chat["messages"]
+    start = chat.get("history_start_index", 0)
+    return [m for m in msgs[start:] if m.get("status", "ok") == "ok"]
 
 
 def history_char_count(chat: dict) -> int:
