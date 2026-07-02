@@ -3,7 +3,8 @@ import os, sys, signal, traceback, argparse, threading, time
 from peer import Peer
 from utils import log, ACTIVATE_UI
  
-from ui.ui import SimApp, disable_input, enable_input, disable_filters, enable_filters
+from ui.ui import IR3DEApp
+from ui.ui_utils import disable_input, enable_input, disable_filters, enable_filters
 
 
 os.environ.setdefault("COLORTERM", "truecolor")
@@ -197,7 +198,7 @@ def main():
     args = get_args()
 
     if ACTIVATE_UI:
-        app = SimApp(args, run_peer, handle_input)
+        app = IR3DEApp(args, run_peer, handle_input)
         _install_tui_node_cleanup(app)   # stop the node on SIGHUP (window close / SSH drop) and SIGTERM
         try:
             app.run()

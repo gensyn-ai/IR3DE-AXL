@@ -2,13 +2,10 @@ import os, random, threading, statistics
 from datetime import datetime, timezone
 
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable, OptionList, Input
+from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable
 from textual.widgets._tabs import Tab
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
 from textual_plotext import PlotextPlot
-from textual.screen import ModalScreen
-from textual.events import MouseDown, MouseUp, MouseMove
 from rich.text import Text as RichText
 from rich.markup import escape as _md_escape
 
@@ -18,472 +15,11 @@ from utils import (format_params, format_mean_std, set_log_widget, set_output_wi
                    unset_output_widget, iter_log_buffer)
 from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
 from peer import Peer
+from ui.components import *
+from ui.ui_utils import read_css, FollowTailLog
 
 
-def disable_input(app):
-    def _disable():
-        app.query_one("#user-input", TextArea).disabled = True
-        app.query_one("#prompt", Static).styles.color = "#444444"
-        app.query_one("#send-button", Static).disabled = True
-    app.call_from_thread(_disable)
-
-
-def enable_input(app, node_id):
-    def _enable():
-        input_widget = app.query_one("#user-input", TextArea)
-        if not input_widget.disabled:
-            return
-        log("User input enabled!", node_id=node_id, msg_type=None, right=True)
-        input_widget.disabled = False
-        input_widget.focus()
-        app.query_one("#prompt", Static).styles.color = "#888888"
-        app.query_one("#send-button", Static).disabled = False
-        app._hide_loading_msg()
-    app.call_from_thread(_enable)
-
-
-def disable_filters(app):
-    def _disable():
-        app.query_one("#filter-toggle", Static).styles.color = "#444444"
-        drawer = app.query_one("#filter-drawer")
-        if drawer.styles.display != "none":
-            drawer.styles.display = "none"
-            app.query_one("#filter-toggle", Static).update("filters ▾")
-        app._filters_enabled = False
-    app.call_from_thread(_disable)
-
-
-def enable_filters(app):
-    def _enable():
-        if app._filters_enabled:
-            return
-        app.query_one("#filter-toggle", Static).styles.color = "#888888"
-        app._filters_enabled = True
-    app.call_from_thread(_enable)
-
-
-def read_css():
-    with open("src/ui/style.css", "r") as f:
-        return f.read()
-
-
-class SubmittableTextArea(TextArea):
-    
-    class Submitted(Message):
-        def __init__(self, value: str):
-            super().__init__()
-            self.value = value
-
-    def submit(self):
-        value = self.text
-        self.text = ""
-        self.post_message(self.Submitted(value))
-
-    def on_key(self, event):
-        if event.key == "enter":
-            event.prevent_default()
-            event.stop()
-            self.submit()
-        elif event.key in ("shift+enter", "ctrl+j"):
-            event.prevent_default()
-            event.stop()
-            self.insert("\n")
-
-
-class ActionChip(Static):
-    """Non-toggleable chip that fires a one-shot action when clicked.
-    Renders bold when `active`, plain otherwise."""
-
-    class Triggered(Message):
-        def __init__(self, action: str):
-            super().__init__()
-            self.action = action
-
-    def __init__(self, action: str, color: str, **kwargs):
-        super().__init__(**kwargs)
-        self.action = action
-        self.color = color
-        self.active = False
-        self._refresh_label()
-
-    def _refresh_label(self):
-        style = f"bold {self.color}" if self.active else self.color
-        self.update(RichText(f"[{self.action.upper()}]", style=style))
-
-    def set_active(self, active: bool):
-        if active == self.active:
-            return
-        self.active = active
-        self._refresh_label()
-
-    def on_click(self, event):
-        self.post_message(self.Triggered(self.action))
-
-
-class FilterChip(Static):
-
-    class Toggled(Message):
-        def __init__(self, msg_type: str, active: bool):
-            super().__init__()
-            self.msg_type = msg_type
-            self.active = active
-
-    def __init__(self, msg_type: str, color: str, **kwargs):
-        super().__init__(**kwargs)
-        self.msg_type = msg_type
-        self.color = color
-        self.active = True
-        self._refresh_label()
-
-    def _refresh_label(self):
-        if self.active:
-            self.update(RichText(f"[{self.msg_type.upper()}]", style=f"bold {self.color}"))
-        else:
-            self.update(RichText(f"[{self.msg_type.upper()}]", style=f"dim {self.color}"))
-
-    def on_click(self, event):
-        self.active = not self.active
-        self._refresh_label()
-        self.post_message(self.Toggled(self.msg_type, self.active))
-
-
-class ToggleChip(Static):
-    """Chip that toggles between plain and bold styling on click."""
-
-    class Toggled(Message):
-        def __init__(self, chip_id: str, active: bool):
-            super().__init__()
-            self.chip_id = chip_id
-            self.active = active
-
-    def __init__(self, label: str, color: str = "#ffffff", **kwargs):
-        super().__init__(**kwargs)
-        self.label = label
-        self.color = color
-        self.active = False
-        self._refresh_label()
-
-    def _refresh_label(self):
-        style = f"bold {self.color}" if self.active else self.color
-        self.update(RichText(f"[{self.label.upper()}]", style=style))
-
-    def on_click(self, event):
-        self.active = not self.active
-        self._refresh_label()
-        self.post_message(self.Toggled(self.id or "", self.active))
-
-
-class FollowTailLog(RichLog):
-    """RichLog that only auto-scrolls when the user is already at the bottom."""
-
-    def write(
-        self,
-        content,
-        width=None,
-        expand=False,
-        shrink=True,
-        scroll_end=None,
-        animate=False,
-    ):
-        at_bottom = self.scroll_y >= self.max_scroll_y - 1
-        return super().write(
-            content,
-            width=width,
-            expand=expand,
-            shrink=shrink,
-            scroll_end=at_bottom,
-            animate=animate,
-        )
-
-
-class TagButton(Static):
-
-    class Toggled(Message):
-        def __init__(self, tag: str, active: bool):
-            super().__init__()
-            self.tag = tag
-            self.active = active
-
-    def __init__(self, tag: str, symbol: str = "◆", **kwargs):
-        super().__init__(**kwargs)
-        self.tag = tag
-        self.symbol = symbol
-        self.active = False
-        self._refresh_label()
-
-    def _refresh_label(self):
-        check = "✓" if self.active else " "
-        # Pad symbol to 3 cells so glyphs like "</>" and "λ" line up the same.
-        sym = self.symbol.ljust(3)
-        self.update(RichText(f" {sym} {self.tag.capitalize():<12} [{check}]"))
-        if self.active:
-            self.add_class("-active")
-        else:
-            self.remove_class("-active")
-
-    def on_click(self, event):
-        self.active = not self.active
-        self._refresh_label()
-        self.post_message(self.Toggled(self.tag, self.active))
-
-
-class ModelRow(Horizontal):
-    """One selectable model row inside an ExpertiseSection."""
-
-    class Selected(Message):
-        def __init__(self, tag: str, peer_pk: str, model_idx: int):
-            super().__init__()
-            self.tag = tag
-            self.peer_pk = peer_pk
-            self.model_idx = model_idx
-
-    def __init__(self, tag: str, peer_pk: str, model_idx: int,
-                 name: str, node_name: str, params: int,
-                 active: bool = False, **kwargs):
-        # Inject "-active" into the classes arg so the CSS engine sees it
-        # from the very first render — no on_mount timing dance.
-        classes_arg = kwargs.pop("classes", "")
-        if active:
-            classes_arg = f"{classes_arg} -active".strip()
-        if classes_arg:
-            kwargs["classes"] = classes_arg
-        super().__init__(**kwargs)
-
-        self._tag = tag
-        self._peer_pk = peer_pk
-        self._model_idx = model_idx
-        self._name = name
-        self._node_name = node_name
-        self._params = params
-        self._active = active
-
-    def compose(self) -> ComposeResult:
-        yield Static("●" if self._active else "○", classes="model-row-glyph")
-        yield Static(self._name, classes="model-row-name")
-        yield Static(self._node_name, classes="model-row-node")
-        yield Static(format_params(self._params), classes="model-row-params")
-
-    def set_active(self, active: bool):
-        if active == self._active:
-            return
-        self._active = active
-        if active:
-            self.add_class("-active")
-        else:
-            self.remove_class("-active")
-        self.query_one(".model-row-glyph", Static).update("●" if active else "○")
-
-    def on_click(self, event):
-        self.post_message(self.Selected(self._tag, self._peer_pk, self._model_idx))
-
-
-class ExpertiseSection(Vertical):
-    """A bordered card listing models for one selected expertise tag."""
-
-    def __init__(self, tag: str, symbol: str,
-                 candidates: list[tuple[str, int, str, str, int]],
-                 selected: tuple[str, int] | None,
-                 **kwargs):
-        super().__init__(**kwargs)
-        self._tag = tag
-        self._symbol = symbol
-        self._candidates = candidates
-        self._selected = selected
-        self._rows_container = Vertical(classes="expertise-section-rows")
-
-    def compose(self) -> ComposeResult:
-        with Horizontal(classes="expertise-section-header"):
-            yield Static(f"{self._symbol.ljust(3)} {self._tag.capitalize()}",
-                         classes="expertise-section-title")
-            yield Static("[SELECTED]", classes="expertise-section-badge")
-        yield Static(f"Select the desired model for {self._tag} tasks.",
-                     classes="expertise-section-desc")
-        yield self._rows_container
-
-    def on_mount(self) -> None:
-        # Rows are added here — at this point _rows_container is in the tree.
-        self._rebuild_rows()
-        self._update_badge()
-
-    def update_state(self, candidates: list[tuple[str, int, str, str, int]], selected: tuple[str, int] | None) -> None:
-        
-        candidates_changed = candidates != self._candidates
-        selected_changed = selected != self._selected
-
-        if not candidates_changed and not selected_changed:
-            return
-
-        self._candidates = candidates
-        self._selected = selected
-
-        if candidates_changed:
-            self._rebuild_rows()
-        else:
-            for row in self._rows_container.query(ModelRow):
-                is_active = self._selected is not None and (row._peer_pk, row._model_idx) == self._selected
-                row.set_active(is_active)
-
-        self._update_badge()
-
-    def _rebuild_rows(self) -> None:
-        for child in list(self._rows_container.children):
-            child.remove()
-
-        if not self._candidates:
-            self._rows_container.mount(
-                Static("No available models for now.", classes="no-models-msg")
-            )
-            return
-
-        for pk, idx, name, node, params in self._candidates:
-            is_active = self._selected is not None and (pk, idx) == self._selected
-            self._rows_container.mount(
-                ModelRow(self._tag, pk, idx, name, node, params, active=is_active)
-            )
-
-    def _update_badge(self) -> None:
-        badge = self.query_one(".expertise-section-badge", Static)
-        badge.styles.display = "block" if self._selected is not None else "none"
-
-    def set_has_selection(self, has: bool) -> None:
-        # Kept for backwards compatibility with callers that still use it.
-        badge = self.query_one(".expertise-section-badge", Static)
-        badge.styles.display = "block" if has else "none"
-
-
-class LatencyMetricSelectScreen(ModalScreen[str]):
-    """Popup that returns one of: 'prompt' | 'total' | 'input'."""
-
-    BINDINGS = [("escape", "cancel", "Cancel")]
-
-    OPTIONS = [
-        ("Prompt latency",        "prompt"),
-        ("Latency / total token", "total"),
-        ("Latency / input token", "input"),
-    ]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="latency-metric-dialog"):
-            yield Static("Choose latency metric", id="latency-metric-dialog-title")
-            yield OptionList(
-                *[label for label, _ in self.OPTIONS],
-                id="latency-metric-options",
-            )
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.dismiss(self.OPTIONS[event.option_index][1])
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-class ResizableDivider(Static):
-    """1-cell vertical bar between #left-pane and #right-pane that the
-    user can click-and-drag to resize the two panes."""
-
-    MIN_PANE_WIDTH = 20    # don't let either pane shrink below this
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._dragging = False
-
-    def on_mouse_down(self, event: MouseDown) -> None:
-        # Pin both panes to their current pixel widths so subsequent
-        # adjustments work in concrete cells, not fr units.
-        app = self.app
-        left  = app.query_one("#left-pane")
-        right = app.query_one("#right-pane")
-        left.styles.width  = left.size.width
-        right.styles.width = right.size.width
-
-        self._dragging = True
-        self.capture_mouse()
-        event.stop()
-
-    def on_mouse_up(self, event: MouseUp) -> None:
-        if self._dragging:
-            self._dragging = False
-            self.release_mouse()
-            event.stop()
-
-    def on_mouse_move(self, event: MouseMove) -> None:
-        if not self._dragging:
-            return
-
-        app = self.app
-        left  = app.query_one("#left-pane")
-        right = app.query_one("#right-pane")
-
-        # The outer Horizontal contains:
-        #   #border-left (1) | #left-pane | #divider (1) | #right-pane | #border-right (1)
-        # So the cells available to the two panes total app.width - 3.
-        total_inner = app.size.width - 3
-
-        # Place the divider directly under the cursor: left pane spans from
-        # the first column after #border-left up to (but not including) the divider.
-        new_left = event.screen_x - 1
-        max_left = total_inner - self.MIN_PANE_WIDTH
-        new_left = max(self.MIN_PANE_WIDTH, min(new_left, max_left))
-
-        left.styles.width  = new_left
-        right.styles.width = total_inner - new_left
-        event.stop()
-
-class ChatTitleRenameScreen(ModalScreen):
-    """Single-field modal that returns the new chat title, or None if cancelled."""
-
-    BINDINGS = [("escape", "cancel", "Cancel")]
-
-    def __init__(self, current_title: str = "", **kwargs):
-        super().__init__(**kwargs)
-        self._current_title = current_title
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="chat-rename-dialog"):
-            yield Static("Rename chat", id="chat-rename-title")
-            yield Input(value=self._current_title,
-                        placeholder="Chat title (Enter to confirm, Esc to cancel)",
-                        id="chat-rename-input",
-                        max_length=MAX_TITLE_CHARS)
-
-    def on_mount(self) -> None:
-        self.query_one("#chat-rename-input", Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.dismiss(event.value.strip())
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-class ChatMenuScreen(ModalScreen[str]):
-    """Popup listing closed, non-empty chats. Dismisses with the chosen
-    chat_id, or None if cancelled."""
-
-    BINDINGS = [("escape", "cancel", "Cancel")]
-
-    def __init__(self, entries: list[tuple[str, str]], **kwargs):
-        # entries: (chat_id, display_label) sorted most-recent-first.
-        super().__init__(**kwargs)
-        self._entries = entries
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="chat-menu-dialog"):
-            yield Static("Open chat", id="chat-menu-title")
-            if not self._entries:
-                yield Static("No closed chats to reopen.", id="chat-menu-empty")
-            else:
-                yield OptionList(*[label for _, label in self._entries], id="chat-menu-options")
-
-    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        chat_id = self._entries[event.option_index][0]
-        self.dismiss(chat_id)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-class SimApp(App):
+class IR3DEApp(App):
     CSS = read_css()
     BINDINGS = [("ctrl+c", "quit", "Quit")]
 
@@ -1822,41 +1358,98 @@ class SimApp(App):
         return f"{_md_escape(title)}  [#888888]×[/]"
 
     def _open_chat_menu(self) -> None:
-        """Show a modal with every non-empty chat for this peer (open and
-        closed), sorted by updated_at descending."""
         if self.peer is None:
             return
 
         candidates: list[tuple[str, dict]] = []
         for chat_id, chat in self.peer.chats.items():
             if not chat.get("messages"):
-                continue      # skip empties — at most one, always reachable via [+]
+                continue
             candidates.append((chat_id, chat))
 
         candidates.sort(key=lambda x: x[1].get("updated_at", ""), reverse=True)
 
-        entries: list[tuple[str, str]] = []
+        entries: list[tuple[str, str, str]] = []
         for chat_id, chat in candidates:
             title = chat.get("title") or "Chat"
             ts = self._format_relative_time(chat.get("updated_at", ""))
-            display = f"{title:<40} {ts}"
-            entries.append((chat_id, display))
+            entries.append((chat_id, title, ts))
 
-        self.push_screen(ChatMenuScreen(entries), self._on_chat_menu_selected)
+        self.push_screen(ChatMenuScreen(entries), self._on_chat_menu_result)
 
-    def _on_chat_menu_selected(self, chat_id) -> None:
-        """Reopen the selected chat as a new tab and activate it."""
-        if chat_id is None or self.peer is None or chat_id not in self.peer.chats:
+    def _on_chat_menu_result(self, result) -> None:
+        """result: None (cancelled) | (chat_id, 'open') | (chat_id, 'delete')."""
+        if result is None or self.peer is None:
             return
+        chat_id, action = result
+
+        if action == "open":
+            if chat_id not in self.peer.chats:
+                return
+            tabbed = self.query_one("#right-tabs", TabbedContent)
+            pane_id = f"tab-chat-{chat_id}"
+            already_open = any(p.id == pane_id for p in tabbed.query(TabPane))
+            if not already_open:
+                self._mount_chat_tab(chat_id, self.peer.chats[chat_id])
+            def _activate() -> None:
+                tabbed.active = pane_id
+            self.call_after_refresh(_activate)
+            self.peer.active_chat_id = chat_id
+
+        elif action == "delete":
+            chat = self.peer.chats.get(chat_id)
+            if chat is None:
+                return
+            title = chat.get("title") or "Chat"
+            def _on_confirm(confirmed: bool | None) -> None:
+                if confirmed:
+                    self._delete_chat(chat_id)
+            self.push_screen(DeleteChatConfirmScreen(title), _on_confirm)
+
+
+    def _delete_chat(self, chat_id: str) -> None:
+        """Permanently delete a chat: remove its tab if open, drop from
+        peer.chats, unlink its disk file. If it was the currently-active
+        tab, activate the left neighbor; if it was the last tab, spawn a
+        fresh empty (matches _close_chat_tab's post-close behaviour)."""
+        if self.peer is None or chat_id not in self.peer.chats:
+            return
+
         tabbed = self.query_one("#right-tabs", TabbedContent)
-        pane_id = f"tab-chat-{chat_id}"
-        try:
-            tabbed.get_pane(pane_id)
-            # Already open — just activate.
-        except Exception:
-            self._mount_chat_tab(chat_id, self.peer.chats[chat_id])
-        tabbed.active = pane_id
-        self.peer.active_chat_id = chat_id
+        open_chat_ids: list[str] = []
+        for p in tabbed.query(TabPane):
+            if p.id and p.id.startswith("tab-chat-"):
+                open_chat_ids.append(p.id[len("tab-chat-"):])
+
+        was_open = chat_id in open_chat_ids
+        was_active = was_open and tabbed.active == f"tab-chat-{chat_id}"
+
+        next_active_id = None
+        if was_active:
+            idx = open_chat_ids.index(chat_id)
+            if idx > 0:
+                next_active_id = open_chat_ids[idx - 1]
+            elif idx + 1 < len(open_chat_ids):
+                next_active_id = open_chat_ids[idx + 1]
+            if next_active_id is not None:
+                tabbed.active = f"tab-chat-{next_active_id}"
+
+        if was_open:
+            unset_output_widget(chat_id)
+            tabbed.remove_pane(f"tab-chat-{chat_id}")
+
+        # peer.delete_chat removes from self.chats and unlinks the file.
+        # It also touches active_chat_id if the deleted was active, but
+        # we've already switched to the neighbor above (if any).
+        self.peer.delete_chat(chat_id)
+
+        if was_active:
+            if next_active_id is not None:
+                self.peer.active_chat_id = next_active_id
+            else:
+                # Last open tab is gone — start on a fresh empty.
+                self.peer.active_chat_id = None
+                self._create_new_chat()
 
     def _format_relative_time(self, iso_ts: str) -> str:
         if not iso_ts:

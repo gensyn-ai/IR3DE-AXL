@@ -607,3 +607,87 @@ ChatMenuScreen {
     padding: 0 1;
     text-align: center;
 }
+
+#chat-menu-list {
+    width: 100%;
+    height: auto;
+    max-height: 20;
+    background: transparent;
+}
+
+ChatMenuRow {
+    height: 1;
+    width: 100%;
+    background: transparent;
+    margin-bottom: 1;
+}
+
+ChatMenuRow:hover {
+    background: #2a2a2a;
+}
+
+.chat-menu-row-label {
+    width: 1fr;
+    height: 1;
+    color: #cccccc;
+    padding: 0 1;
+}
+
+.chat-menu-row-delete {
+    width: 3;
+    height: 1;
+    color: #888888;
+    content-align: center middle;
+}
+
+.chat-menu-row-delete:hover {
+    color: #ff6666;
+    text-style: bold;
+}
+
+DeleteChatConfirmScreen {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.4);
+}
+
+#delete-chat-dialog {
+    width: 60;
+    height: auto;
+    background: #1a1a1a;
+    border: round #ff6666;
+    padding: 1 2;
+}
+
+#delete-chat-title {
+    width: 100%;
+    color: #ff6666;
+    text-style: bold;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#delete-chat-warning {
+    width: 100%;
+    color: #888888;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#delete-chat-buttons {
+    width: 100%;
+    height: 1;
+    align: center middle;
+}
+
+.chat-dialog-btn {
+    width: auto;
+    padding: 0 2;
+    margin: 0 1;
+    color: #ffffff;
+    background: transparent;
+}
+
+.chat-dialog-btn:hover {
+    background: #333333;
+    text-style: bold;
+}
