@@ -33,6 +33,10 @@ class DeleteChatConfirmScreen(ModalScreen[bool]):
     def on_click(self, event) -> None:
         if event.control is None:
             return
+        if event.control is self:
+            # Clicked the backdrop — treat as cancel.
+            self.dismiss(False)
+            return
         if event.control.id == "delete-chat-confirm-btn":
             self.dismiss(True)
         elif event.control.id == "delete-chat-cancel-btn":

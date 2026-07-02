@@ -35,3 +35,7 @@ class ChatMenuScreen(ModalScreen[tuple[str, str] | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+    
+    def on_click(self, event) -> None:
+        if event.control is self:
+            self.dismiss(None)

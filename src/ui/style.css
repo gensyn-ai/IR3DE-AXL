@@ -691,3 +691,11 @@ DeleteChatConfirmScreen {
     background: #333333;
     text-style: bold;
 }
+
+.chat-placeholder {
+    height: 1;
+    width: 100%;
+    color: #888888;
+    padding: 0 1;
+    text-style: italic;
+}

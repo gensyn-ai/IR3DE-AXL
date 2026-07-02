@@ -10,13 +10,13 @@ from rich.text import Text as RichText
 from rich.markup import escape as _md_escape
 
 import chats
+from peer import Peer
+from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
+from ui.components import *
+from ui.ui_utils import read_css, FollowTailLog
 from utils import (format_params, format_mean_std, set_log_widget, set_output_widget, log, MSG_TYPE_COLORS,
                    set_filter_predicate, ipv6_from_pubkey, symbol_for_tag, MAX_TITLE_CHARS, render_chat_history_into,
                    unset_output_widget, iter_log_buffer)
-from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
-from peer import Peer
-from ui.components import *
-from ui.ui_utils import read_css, FollowTailLog
 
 
 class IR3DEApp(App):
@@ -332,9 +332,19 @@ class IR3DEApp(App):
         div.update("═" * div.size.width)
 
     def on_submittable_text_area_submitted(self, event: SubmittableTextArea.Submitted):
+        if self.peer is not None and self.peer.active_chat_id is not None:
+            self._hide_chat_placeholder(self.peer.active_chat_id)
         user_text = event.value
         if self.input_handler is not None:
             self.input_handler(self, self.args, user_text)
+
+    def _hide_chat_placeholder(self, chat_id: str) -> None:
+        """Hide the 'Write a message below' placeholder for a chat. Uses query()
+        (returns [] when the widget isn't there) so an already-non-existent
+        placeholder — e.g. because the chat had messages when it was mounted —
+        is a silent no-op."""
+        for placeholder in self.query(f"#placeholder-{chat_id}"):
+            placeholder.styles.display = "none"
 
     async def action_quit(self):
         if self.peer is not None:
@@ -372,15 +382,8 @@ class IR3DEApp(App):
         elif event.control.id == "chat-menu-button":
             self._open_chat_menu()
 
-        node = event.control
-        tab_widget = None
-        for _ in range(6):
-            if node is None:
-                break
-            if isinstance(node, Tab):
-                tab_widget = node
-                break
-            node = getattr(node, "parent", None)
+        # Locate the Tab widget under the click, if any.
+        tab_widget = next((node for node in event.control.ancestors_with_self if isinstance(node, Tab)), None)
 
         if tab_widget is not None:
             tab_id = tab_widget.id or ""
@@ -388,30 +391,17 @@ class IR3DEApp(App):
             if tab_id.startswith(marker):
                 chat_id_from_tab = tab_id[len(marker):]
                 width = tab_widget.size.width
-                # Tab has padding 0 2. Layout is:
-                #   [pad-left(2)] label ("Title  ×") [pad-right(2)]
-                # Treat clicks on the last 3 columns (× + its trailing pad) as close.
-                if event.x >= width - 3:
+
+                if width <= event.x <= width + 2:
                     self._close_chat_tab(chat_id_from_tab)
                     event.stop()
                     return
-        
-        if event.chain == 2:
-            node = event.control
-            for _ in range(6):                          # walk a few levels up
-                if node is None:
-                    break
-                node_id = getattr(node, "id", None) or ""
-                # match the Tab generated for our "tab-chat" TabPane, but not the
-                # scroll container or anything else that happens to contain it
-                if "tab-chat" in node_id and "scroll" not in node_id and node_id != "tab-chat":
+
+                # Double-click anywhere else on the tab -> rename.
+                if event.chain == 2:
                     self._open_chat_rename_dialog()
+                    event.stop()
                     return
-                # also accept a direct click on the TabPane label area
-                if node_id == "tab-chat":
-                    self._open_chat_rename_dialog()
-                    return
-                node = getattr(node, "parent", None)
 
     def _toggle_drawer(self):
         drawer = self.query_one("#filter-drawer")
@@ -1224,6 +1214,11 @@ class IR3DEApp(App):
         pane = TabPane(self._make_tab_label(title), id=pane_id)
         tabbed = self.query_one("#right-tabs", TabbedContent)
         add_result = tabbed.add_pane(pane)
+
+        placeholder = Static("Write a message below", id=f"placeholder-{chat_id}", classes="chat-placeholder")
+        if chat.get("messages"):
+            placeholder.styles.display = "none"
+        pane.mount(placeholder)
 
         output = RichLog(id=f"output-{chat_id}", classes="chat-output", highlight=False, markup=False, auto_scroll=True, wrap=True)
         pane.mount(output)
