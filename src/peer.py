@@ -1188,6 +1188,7 @@ class Peer:
                 log(f"Could not reach the peer hosting your selected model ({selected_model[0][:8]}...). "
                     f"It will be deselected automatically if it stays offline; please try again.",
                     self.peer_id, msg_type="warning", right=True)
+                assert self.current_chat is not None
                 chats.mark_last_user_failed(self.current_chat)
                 return
 

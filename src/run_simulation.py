@@ -179,7 +179,11 @@ def run_peer(app, args):
             target_peer.stop_node()
 
         if app is not None:
-            app.call_from_thread(app.exit)
+            try:
+                app.call_from_thread(app.exit)
+            except RuntimeError:
+                # App is already stopping; nothing left to signal.
+                pass
 
 
 def handle_input(app, args, user_input):

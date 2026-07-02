@@ -1,5 +1,4 @@
 import os, random, threading, statistics
-from typing import TYPE_CHECKING
 from datetime import datetime, timezone
 
 from textual.app import App, ComposeResult
@@ -18,9 +17,7 @@ from utils import (format_params, format_mean_std, set_log_widget, set_output_wi
                    set_filter_predicate, ipv6_from_pubkey, symbol_for_tag, MAX_TITLE_CHARS, render_chat_history_into,
                    unset_output_widget)
 from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
-
-if TYPE_CHECKING:
-    from peer import Peer
+from peer import Peer
 
 
 def disable_input(app):
@@ -32,22 +29,22 @@ def disable_input(app):
 
 
 def enable_input(app, node_id):
-    input_widget = app.query_one("#user-input", TextArea)
-    if input_widget.disabled:
+    def _enable():
+        input_widget = app.query_one("#user-input", TextArea)
+        if not input_widget.disabled:
+            return
         log("User input enabled!", node_id=node_id, msg_type=None, right=True)
-        def _enable():
-            input_widget.disabled = False
-            input_widget.focus()
-            app.query_one("#prompt", Static).styles.color = "#888888"
-            app.query_one("#send-button", Static).disabled = False
-            app._hide_loading_msg()
-        app.call_from_thread(_enable)
+        input_widget.disabled = False
+        input_widget.focus()
+        app.query_one("#prompt", Static).styles.color = "#888888"
+        app.query_one("#send-button", Static).disabled = False
+        app._hide_loading_msg()
+    app.call_from_thread(_enable)
 
 
 def disable_filters(app):
     def _disable():
         app.query_one("#filter-toggle", Static).styles.color = "#444444"
-        # Force the drawer closed
         drawer = app.query_one("#filter-drawer")
         if drawer.styles.display != "none":
             drawer.styles.display = "none"
@@ -1643,8 +1640,8 @@ class SimApp(App):
             return
 
         tabbed = self.query_one("#right-tabs", TabbedContent)
-        await tabbed.clear_panes()
         self._right_spinner_active = False
+        await tabbed.clear_panes()
 
         # 1. Restore chats that were open last session. Sorted by updated_at
         #    ascending so the most-recently-touched ones end up rightmost —
