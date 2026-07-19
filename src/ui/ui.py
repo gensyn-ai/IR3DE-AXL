@@ -812,7 +812,7 @@ class IR3DEApp(App):
             child.remove()
 
         # Pack buttons into rows that fit horizontally
-        button_w = 24                       # must roughly match CSS width
+        button_w = 26                       # must match TagButton { width: 26 } in style.css
         margin   = 1
         per_row  = max(1, avail // (button_w + margin))
 

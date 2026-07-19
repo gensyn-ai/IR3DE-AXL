@@ -1,7 +1,9 @@
 import ipaddress, time, io, struct, os, uuid, threading, json, contextlib, io, warnings, statistics
+from copy import deepcopy
 
 import torch
 import numpy as np
+from tqdm import tqdm as _tqdm
 
 from textual.widgets import RichLog
 
@@ -10,6 +12,9 @@ from rich.text import Text
 from termcolor import colored
 from collections import deque
 
+_tqdm.set_lock(threading.RLock())
+
+IR3DE_STATS_REPO_ID = "Erosinho/IR3DE-stats"
 
 ACTIVATE_UI = True
 MAX_TITLE_CHARS = 60
@@ -467,6 +472,62 @@ def redirect_prints_safe(func, *args, **kwargs):
         os.dup2(saved_stderr, 2)
         os.close(devnull)
         os.close(saved_stderr)
+
+
+def ensure_stats_file(path: str) -> str:
+    """Return `path`, downloading it from the IR3DE-stats HF repo into its
+    parent directory first if it isn't present locally yet."""
+    if os.path.isfile(path):
+        return path
+    from huggingface_hub import hf_hub_download
+    filename = os.path.basename(path)
+    local_dir = os.path.dirname(path) or "."
+    log(f"Stats file '{path}' not found locally; downloading '{filename}' from "
+        f"'{IR3DE_STATS_REPO_ID}'...", "SYSTEM", msg_type=None)
+    return hf_hub_download(repo_id=IR3DE_STATS_REPO_ID, filename=filename, local_dir=local_dir)
+
+
+_EMBED_WEIGHT_KEY_CANDIDATES = ("model.embed_tokens.weight", "transformer.wte.weight", "embed_tokens.weight")
+
+
+def load_embedder_only(model_name: str) -> torch.nn.Embedding:
+    """Load just a causal LM's input-embedding weight matrix, without
+    building (or downloading the full weights of) the rest of the model —
+    attention/MLP layers, lm_head, etc. IR3DE only ever needs embedding
+    lookups from these models, so instantiating the whole multi-billion-
+    parameter network just to keep one of its weight tensors is enormous,
+    avoidable overhead. Falls back to the full-model load if the checkpoint
+    doesn't use a recognized safetensors layout.
+    """
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.utils import EntryNotFoundError
+    from safetensors import safe_open
+
+    try:
+        try:
+            index_path = hf_hub_download(model_name, "model.safetensors.index.json")
+            with open(index_path) as f:
+                weight_map = json.load(f)["weight_map"]
+            embed_key = next(k for k in _EMBED_WEIGHT_KEY_CANDIDATES if k in weight_map)
+            shard_path = hf_hub_download(model_name, weight_map[embed_key])
+        except EntryNotFoundError:
+            shard_path = hf_hub_download(model_name, "model.safetensors")
+            with safe_open(shard_path, framework="pt") as f:
+                embed_key = next(k for k in _EMBED_WEIGHT_KEY_CANDIDATES if k in f.keys())
+
+        with safe_open(shard_path, framework="pt") as f:
+            weight = f.get_tensor(embed_key).to(torch.float32)
+        return torch.nn.Embedding.from_pretrained(weight)
+
+    except Exception as e:
+        log(f"Fast embedder-only load failed for '{model_name}' ({e}); "
+            f"falling back to loading the full model.", "SYSTEM", msg_type="warning")
+        from transformers import AutoModelForCausalLM
+        model = redirect_prints_safe(AutoModelForCausalLM.from_pretrained, model_name)
+        embedder = deepcopy(model.model.embed_tokens).to(torch.float32)
+        del model
+        return embedder
+
 
 def format_mean_std(values, unit="s", scale=1.0, precision=2):
     """Render a list of samples as 'mean ± std unit'. Empty → '—', single → 'value unit'."""

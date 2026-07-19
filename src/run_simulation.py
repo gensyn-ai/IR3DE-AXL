@@ -31,6 +31,7 @@ def get_args():
                         help="Maximum character budget for the prompt sent to experts (system "
                              "prompt + summary + history). When exceeded, oldest user/agent pairs "
                              "are summarised. Set to 0 to disable.")
+    parser.add_argument('--tok-type', type=str, default='mistral', choices=['llama', 'mistral'], help='Type of tokenizer to use')
     return parser.parse_args()
  
  
@@ -97,7 +98,8 @@ def run_peer(app, args):
             ir3de_entropy_top_k=args.ir3de_entropy_top_k,
             max_answer_length=args.max_answer_length,
             num_characters_conversation_history=args.num_characters_conversation_history,
-            on_axl_ready=_on_axl_ready
+            on_axl_ready=_on_axl_ready,
+            tokenizer_name="mistralai/Mistral-7B-v0.1" if args.tok_type == 'mistral' else "meta-llama/Meta-Llama-3-8B"
         )
         if app is not None:
             app.peer = peer

@@ -1,6 +1,4 @@
-import gc
 import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit, threading
-from copy import deepcopy
 
 import torch
 import torch.nn.functional as F
@@ -12,7 +10,7 @@ import chats
 from ir3de_stats.models.llama_experts import get_llama_expert
 from utils import (ipv6_from_pubkey, log, redirect_prints_safe, serialize_safe, deserialize_safe,
                    deserialize_chunk_header, format_prompt_for_expert, SUMMARY_SYSTEM_PROMPT,
-                   TITLE_SYSTEM_PROMPT, MAX_TITLE_CHARS)
+                   TITLE_SYSTEM_PROMPT, MAX_TITLE_CHARS, ensure_stats_file, load_embedder_only)
 
 
 AXL = "http://127.0.0.1:91"
@@ -38,7 +36,8 @@ def _load_or_create_local_peer_id() -> str:
 
 class Peer:
 
-    def __init__(self, peer_id, ir3de_lambda=0.01, ir3de_entropy_top_k=10, max_answer_length=256, num_characters_conversation_history=8000, on_axl_ready=None):
+    def __init__(self, peer_id, ir3de_lambda=0.01, ir3de_entropy_top_k=10, max_answer_length=256,
+                 num_characters_conversation_history=8000, on_axl_ready=None, tokenizer_name="mistralai/Mistral-7B-v0.1"):
         
         with open(f"ir3de_stats/default_stats.json", "r") as f:
             default_stats = json.load(f)
@@ -67,14 +66,7 @@ class Peer:
         )
         atexit.register(self.stop_node)  # deterministic node cleanup on normal interpreter exit
         sleep_time = 5
-        # Numbered peers use the id passed on the CLI (stable by construction).
-        # The no-`--peer-id` peer has none to use, so one is persisted to disk
-        # on first run and reused on every subsequent run.
         self.peer_id = peer_id if peer_id is not None else _load_or_create_local_peer_id()
-        # AXL API port suffix: numbered peers use their own two-digit id;
-        # the no-`--peer-id` peer shares slot "00" (config.json's api_port
-        # matches config00.json's), so it must resolve the same way here as
-        # in get_topology()/send()/recv_loop() below.
         self._axl_suffix = f"{peer_id:02d}" if isinstance(peer_id, int) else "00"
         self.node_name = metadata.get("node_name", f"Node {self.peer_id}")
         log(f"Waiting {sleep_time} seconds for node {self.peer_id} to initialize...", self.peer_id, msg_type=None)
@@ -97,14 +89,34 @@ class Peer:
         self.known_tags = []
         self.selected_tags: set[str] = set()
         self.selected_models: dict[str, tuple[str, int]] = {}
+        self.default_tokenizer_name = self.default_embedder_name = tokenizer_name
         self.models_info = metadata.get("models", [])
         self.models = self.get_models_info()
-        self.stats_info = default_stats.get("stats", []) + metadata.get("stats", [])
+
+        # Only load stats matching this peer's active (tokenizer, embedder)
+        # identifier — entries for other identifiers (e.g. Llama stats while
+        # running --tok-type mistral) are skipped before ever downloading or
+        # torch.load-ing them.
+        all_stats_info = default_stats.get("stats", []) + metadata.get("stats", [])
+        seen_paths = set()
+        deduped_stats_info = []
+        for s in all_stats_info:
+            if s["path"] in seen_paths:
+                continue  # e.g. metadata.json re-listing a stat already in default_stats.json
+            seen_paths.add(s["path"])
+            deduped_stats_info.append(s)
+        self.stats_info = [
+            s for s in deduped_stats_info
+            if s.get("tokenizer_name") == self.default_tokenizer_name
+            and s.get("embedder_name") == self.default_embedder_name
+        ]
+        skipped = len(deduped_stats_info) - len(self.stats_info)
+        if skipped:
+            log(f"Skipped {skipped} stats entr{'y' if skipped == 1 else 'ies'} not matching "
+                f"active identifier ({self.default_tokenizer_name}, {self.default_embedder_name}).",
+                self.peer_id, msg_type=None)
         self.stats = self.get_stats_info()
 
-        # FUTURE WORK: allow the user for chosing the desired tokenizer and embedder with the UI. Using always the default for now.
-        self.default_tokenizer_name = "meta-llama/Meta-Llama-3-8B"
-        self.default_embedder_name = "meta-llama/Meta-Llama-3-8B"
         self.default_lambda = ir3de_lambda
         self.entropy_top_k = ir3de_entropy_top_k
         self.max_answer_length = max_answer_length
@@ -199,24 +211,37 @@ class Peer:
         return models
 
     def get_stats_info(self):
-        
-        all_stats = []
-        
-        for i, stats in enumerate(self.stats_info):
-            
-            stats_data = torch.load(stats["path"], map_location='cpu')
-            
-            tokenizer = AutoTokenizer.from_pretrained(stats_data["tokenizer"])
-            model = AutoModelForCausalLM.from_pretrained(stats_data["embedder"])
-            embedder = deepcopy(model.model.embed_tokens).to(torch.float32)
 
-            del model
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                
-            self.stats_info[i]['tokenizer_name'] = stats_data["tokenizer"]
-            self.stats_info[i]['embedder_name'] = stats_data["embedder"]
+        all_stats = []
+        valid_stats_info = []  # kept in lockstep with all_stats; entries that fail to
+                                # load (even after a re-download) are dropped from both,
+                                # so callers zip()-ing them together never desync.
+        loaded = {}  # (tokenizer_name, embedder_name) -> (tokenizer, embedder); several
+                     # default stats entries share the same pair, so load each only once.
+
+        for stats in self.stats_info:
+
+            stats_path = ensure_stats_file(stats["path"])
+            try:
+                stats_data = torch.load(stats_path, map_location='cpu')
+            except Exception:
+                os.remove(stats_path)
+                stats_path = ensure_stats_file(stats["path"])
+                try:
+                    stats_data = torch.load(stats_path, map_location='cpu')
+                except Exception:
+                    continue
+
+            key = (stats_data["tokenizer"], stats_data["embedder"])
+            if key not in loaded:
+                tokenizer = AutoTokenizer.from_pretrained(stats_data["tokenizer"])
+                embedder = load_embedder_only(stats_data["embedder"])
+                loaded[key] = (tokenizer, embedder)
+            tokenizer, embedder = loaded[key]
+
+            stats['tokenizer_name'] = stats_data["tokenizer"]
+            stats['embedder_name'] = stats_data["embedder"]
+            valid_stats_info.append(stats)
             A = stats_data["A"]
             b = stats_data["b"]
             all_stats.append({
@@ -228,11 +253,12 @@ class Peer:
                 "datasets": stats_data["datasets_names"],
                 "owner_public_key": self.public_key
             })
-            
+
             for tag in stats_data["domain_tags"]:
                 if tag not in self.known_tags:
                     self.known_tags.append(tag)
 
+        self.stats_info = valid_stats_info
         return all_stats
 
     def send(self, message, peer_public_key, timeout=5, large=False):
