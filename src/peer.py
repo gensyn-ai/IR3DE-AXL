@@ -19,6 +19,22 @@ AXL = "http://127.0.0.1:91"
 
 PEER_DEAD_TIMEOUT = 300  # seconds with no inbound from a peer before it's pruned (refreshed on any inbound)
 
+LOCAL_PEER_ID_PATH = pathlib.Path("local_nodes/local_peer_id.txt")
+
+
+def _load_or_create_local_peer_id() -> str:
+    """Stable id for the no-`--peer-id` peer, persisted alongside its
+    pk.pem/metadata.json so it survives across runs instead of being
+    regenerated (and thus changing) every launch."""
+    if LOCAL_PEER_ID_PATH.is_file():
+        existing = LOCAL_PEER_ID_PATH.read_text().strip()
+        if existing:
+            return existing
+    new_id = uuid.uuid4().hex[:8]
+    LOCAL_PEER_ID_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOCAL_PEER_ID_PATH.write_text(new_id)
+    return new_id
+
 
 class Peer:
 
@@ -27,32 +43,49 @@ class Peer:
         with open(f"ir3de_stats/default_stats.json", "r") as f:
             default_stats = json.load(f)
 
-        with open(f"local_nodes/metadata{peer_id:02d}.json", "r") as f:
+        if peer_id is None:
+            metadata_path = f"local_nodes/metadata.json"
+            log_path = f"axl-logs/node.log"
+        else:
+            metadata_path = f"local_nodes/metadata{peer_id:02d}.json"
+            log_path = f"axl-logs/node-{peer_id:02d}.log"
+
+        self.metadata_path = metadata_path
+        with open(metadata_path, "r") as f:
             metadata = json.load(f)
-            self.node_name = metadata.get("node_name", f"Node {peer_id}")
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         pathlib.Path("axl-logs").mkdir(exist_ok=True)
-        log_fp = open(f"axl-logs/node-{peer_id:02d}.log", "w", buffering=1)
+        log_fp = open(log_path, "w", buffering=1)
+        start_node_args = ["./scripts/start_node.sh", str(peer_id)] if peer_id is not None else ["./scripts/start_node.sh"]
         self.proc = subprocess.Popen(
-            ["./scripts/start_node.sh", str(peer_id)],
+            start_node_args,
             stdout=log_fp,
             stderr=subprocess.STDOUT,
             start_new_session=True,  # own process group, so stop_node() can kill the whole node tree
         )
         atexit.register(self.stop_node)  # deterministic node cleanup on normal interpreter exit
         sleep_time = 5
-        log(f"Waiting {sleep_time} seconds for node {peer_id} to initialize...", peer_id, msg_type=None)
+        # Numbered peers use the id passed on the CLI (stable by construction).
+        # The no-`--peer-id` peer has none to use, so one is persisted to disk
+        # on first run and reused on every subsequent run.
+        self.peer_id = peer_id if peer_id is not None else _load_or_create_local_peer_id()
+        # AXL API port suffix: numbered peers use their own two-digit id;
+        # the no-`--peer-id` peer shares slot "00" (config.json's api_port
+        # matches config00.json's), so it must resolve the same way here as
+        # in get_topology()/send()/recv_loop() below.
+        self._axl_suffix = f"{peer_id:02d}" if isinstance(peer_id, int) else "00"
+        self.node_name = metadata.get("node_name", f"Node {self.peer_id}")
+        log(f"Waiting {sleep_time} seconds for node {self.peer_id} to initialize...", self.peer_id, msg_type=None)
         time.sleep(sleep_time)
 
         if on_axl_ready is not None:
             try:
                 on_axl_ready()
             except Exception as e:
-                log(f"on_axl_ready callback failed: {e}", peer_id, msg_type="warning")
+                log(f"on_axl_ready callback failed: {e}", self.peer_id, msg_type="warning")
 
-        self.peer_id = peer_id
         self.session = requests.Session()
         self.topology = self.get_topology(self.session)
         self.public_key = self.topology['our_public_key']
@@ -108,9 +141,9 @@ class Peer:
                 chat = chats.load_chat(meta["chat_id"])
             except Exception as e:
                 log(f"Failed to load chat {meta['chat_id']}: {e}",
-                    peer_id, msg_type="warning")
+                    self.peer_id, msg_type="warning")
                 continue
-            if chat.get("peer_name") != self.node_name:
+            if chat.get("peer_id") != self.peer_id:
                 continue                                # belongs to another peer
             self.chats[chat["chat_id"]] = chat
 
@@ -124,7 +157,7 @@ class Peer:
         atexit.register(self._save_all_chats_safely)
     
     def get_topology(self, session):
-        resp = session.get(f"{AXL}{self.peer_id:02d}/topology", timeout=5)
+        resp = session.get(f"{AXL}{self._axl_suffix}/topology", timeout=5)
         resp.raise_for_status()
         topology = resp.json()
         return topology
@@ -146,7 +179,7 @@ class Peer:
                 model = redirect_prints_safe(AutoModelForCausalLM.from_pretrained, model_info["hf_name"])
                 model.to(self.device)  # type: ignore
             else:
-                raise ValueError(f"Model info for node {self.peer_id} must contain either 'path' or 'hf_name'. Provided info: {model_info}. Check the metadata{self.peer_id:02d}.json file.")
+                raise ValueError(f"Model info for node {self.peer_id} must contain either 'path' or 'hf_name'. Provided info: {model_info}. Check the {self.metadata_path} file.")
 
             model_tags = model_info.get("tags", [])
             for tag in model_tags:
@@ -206,7 +239,7 @@ class Peer:
         try:
             if not large:
                 self.session.post(
-                    f"{AXL}{self.peer_id:02d}/send",
+                    f"{AXL}{self._axl_suffix}/send",
                     headers={"X-Destination-Peer-Id": peer_public_key},
                     data=json.dumps(message),
                     timeout=timeout
@@ -221,7 +254,7 @@ class Peer:
                 for i, chunk in enumerate(chunks):
                     log(f"Sending chunk {i+1}/{len(chunks)} to {peer_public_key[:8]}...", self.peer_id, msg_type="stats")
                     self.session.post(
-                        f"{AXL}{self.peer_id:02d}/send",
+                        f"{AXL}{self._axl_suffix}/send",
                         headers={"X-Destination-Peer-Id": peer_public_key},
                         data=chunk,
                         timeout=timeout
@@ -253,7 +286,7 @@ class Peer:
         
         while True:
             
-            resp = self.session.get(f"{AXL}{self.peer_id:02d}/recv")
+            resp = self.session.get(f"{AXL}{self._axl_suffix}/recv")
 
             if resp.status_code == 200 and len(resp.content) > 0 and not resp.content.startswith(b"{"):
                 
@@ -1419,7 +1452,7 @@ class Peer:
     def new_chat(self) -> str:
         """Create a new empty chat owned by this peer, register it, and return
         its chat_id."""
-        chat = chats.new_chat(peer_name=self.node_name)
+        chat = chats.new_chat(peer_id=self.peer_id, peer_name=self.node_name)
         cid = chat["chat_id"]
         self.chats[cid] = chat
         if self.active_chat_id is None:

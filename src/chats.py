@@ -10,7 +10,8 @@ A chat is a plain dict matching this shape:
       "updated_at":          str,
       "summary":             str | None,
       "history_start_index": int,       # messages[:history_start_index] are covered by 'summary'
-      "peer_name":           str | None,
+      "peer_id":             int | str | None,  # owning peer's stable id; used to decide which chats a peer loads on startup
+      "peer_name":           str | None,         # display-only; not unique, not used for ownership
       "open_in_ui":          bool,
       "messages":            [
       
@@ -63,7 +64,7 @@ def chat_path(chat_id: str) -> Path:
 # ───────────────────────── constructors ─────────────────────────
 
 
-def new_chat(peer_name: str | None = None) -> dict:
+def new_chat(peer_id: int | str | None = None, peer_name: str | None = None) -> dict:
     """Build a fresh empty chat. Caller is responsible for persisting it."""
     now = _now_iso()
     return {
@@ -73,6 +74,7 @@ def new_chat(peer_name: str | None = None) -> dict:
         "updated_at":          now,
         "summary":             None,
         "history_start_index": 0,
+        "peer_id":             peer_id,
         "peer_name":           peer_name,
         "open_in_ui":          False,
         "messages":            [],

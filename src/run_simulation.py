@@ -12,7 +12,7 @@ os.environ.setdefault("COLORTERM", "truecolor")
  
 def get_args():
     parser = argparse.ArgumentParser(description="Test one peer locally")
-    parser.add_argument("--peer-id", type=int, required=False, default=0)
+    parser.add_argument("--peer-id", type=int, required=False, default=None)
     parser.add_argument("--discover-peers-interval", type=int, default=60)
     parser.add_argument("--check-acks-interval", type=int, default=100)
     parser.add_argument("--greeting-timeout", type=int, default=60)
