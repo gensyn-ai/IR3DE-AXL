@@ -336,7 +336,16 @@ class IR3DEApp(App):
             self._hide_chat_placeholder(self.peer.active_chat_id)
         user_text = event.value
         if self.input_handler is not None:
-            self.input_handler(self, self.args, user_text)
+            # input_handler ultimately blocks on future.result() while the expert
+            # generates (peer.py's _continue_handle_user_input) — this handler runs
+            # on the main/event-loop thread, so calling it inline freezes the whole
+            # UI for the duration of generation. Run it off-thread instead.
+            threading.Thread(
+                target=self.input_handler,
+                args=(self, self.args, user_text),
+                daemon=True,
+                name="handle-input",
+            ).start()
 
     def _hide_chat_placeholder(self, chat_id: str) -> None:
         """Hide the 'Write a message below' placeholder for a chat. Uses query()

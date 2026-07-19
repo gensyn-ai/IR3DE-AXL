@@ -2,13 +2,13 @@ import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atex
 
 import torch
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from concurrent.futures import ThreadPoolExecutor
+from transformers import AutoTokenizer
+from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 import chats
-from ir3de_stats.models.llama_experts import get_llama_expert
-from utils import (ipv6_from_pubkey, log, redirect_prints_safe, serialize_safe, deserialize_safe,
+import model_worker
+from utils import (ipv6_from_pubkey, log, serialize_safe, deserialize_safe,
                    deserialize_chunk_header, format_prompt_for_expert, SUMMARY_SYSTEM_PROMPT,
                    TITLE_SYSTEM_PROMPT, MAX_TITLE_CHARS, ensure_stats_file, load_embedder_only)
 
@@ -90,6 +90,19 @@ class Peer:
         self.selected_tags: set[str] = set()
         self.selected_models: dict[str, tuple[str, int]] = {}
         self.default_tokenizer_name = self.default_embedder_name = tokenizer_name
+
+        # Expert models are loaded and generate() runs entirely inside this
+        # worker process, never in-process here — a single long C call inside
+        # from_pretrained()/generate() can hold the GIL for its whole
+        # duration no matter how thread priorities are tuned, freezing the
+        # Textual UI if it ran in this process, even on a background thread.
+        # A separate process has its own GIL, so the OS scheduler keeps the
+        # main process's event loop responsive regardless of what this one
+        # is doing. atexit-registered since a ProcessPoolExecutor spawns a
+        # real OS process that must be torn down on exit.
+        self.model_executor = ProcessPoolExecutor(max_workers=1, initializer=model_worker.init_worker)
+        atexit.register(self.model_executor.shutdown)
+
         self.models_info = metadata.get("models", [])
         self.models = self.get_models_info()
 
@@ -139,8 +152,6 @@ class Peer:
 
         self.chunks = {}
 
-        self.generation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gen")
-
         self.chats: dict[str, dict] = {}
         self.active_chat_id: str | None = None
         self.tmp_trimmed_pairs: dict[str, list] = {}
@@ -176,38 +187,25 @@ class Peer:
 
     def get_models_info(self):
         models = []
-        for model_info in self.models_info:
-            if "path" in model_info: # In the future, we might want to allow only hf models
-                model, _, _ = get_llama_expert(1.15e8)
-                if os.path.isfile(model_info["path"]):
-                    log(f"Loading expert model from {model_info['path']}", self.peer_id, msg_type=None)
-                    state = torch.load(model_info["path"], map_location='cpu')
-                else:
-                    raise FileNotFoundError(f"Checkpoint path not found: {model_info['path']}")
-                model.load_state_dict(state, strict=False)
-                model.to(self.device)
-            elif "hf_name" in model_info:
-                log(f"Loading expert model from {model_info['hf_name']}", self.peer_id, msg_type=None)
-                model = redirect_prints_safe(AutoModelForCausalLM.from_pretrained, model_info["hf_name"])
-                model.to(self.device)  # type: ignore
-            else:
-                raise ValueError(f"Model info for node {self.peer_id} must contain either 'path' or 'hf_name'. Provided info: {model_info}. Check the {self.metadata_path} file.")
+        for i, model_info in enumerate(self.models_info):
+            display_name = model_info.get("hf_name") or model_info.get("path", "unknown")
+            log(f"Loading expert model from {display_name}", self.peer_id, msg_type=None)
+
+            try:
+                meta = self.model_executor.submit(model_worker.load_model, i, model_info).result()
+            except FileNotFoundError:
+                raise
+            except ValueError as e:
+                raise ValueError(f"{e} Check the {self.metadata_path} file.") from e
 
             model_tags = model_info.get("tags", [])
             for tag in model_tags:
                 if tag not in self.known_tags:
                     self.known_tags.append(tag)
 
-            tokenizer = AutoTokenizer.from_pretrained(model_info["tokenizer"])
-            models.append(
-                {
-                    "model": model,
-                    "tokenizer": tokenizer,
-                    "tags": model_tags
-                }
-            )
-            model_info["size"] = sum(p.numel() for p in model.parameters())
-            model_info["type"] = getattr(model.config, "model_type", "unknown")
+            models.append({"tags": model_tags})
+            model_info["size"] = meta["size"]
+            model_info["type"] = meta["type"]
         return models
 
     def get_stats_info(self):
@@ -221,12 +219,12 @@ class Peer:
 
         for stats in self.stats_info:
 
-            stats_path = ensure_stats_file(stats["path"])
+            stats_path = ensure_stats_file(stats["path"], self.peer_id)
             try:
                 stats_data = torch.load(stats_path, map_location='cpu')
             except Exception:
                 os.remove(stats_path)
-                stats_path = ensure_stats_file(stats["path"])
+                stats_path = ensure_stats_file(stats["path"], self.peer_id)
                 try:
                     stats_data = torch.load(stats_path, map_location='cpu')
                 except Exception:
@@ -396,8 +394,18 @@ class Peer:
                     message = msg.get('message')
                     log(f"From {sender[:8]}...: {message}", self.peer_id, msg_type="text")
 
-                    model_utils = self.models[msg['selected_model'][1]]
-                    answer, num_input_tokens, num_output_tokens = self.generate_answer(message, model_utils)
+                    model_idx = msg['selected_model'][1]
+                    future = self.model_executor.submit(model_worker.generate, model_idx, message, self.max_answer_length)
+                    try:
+                        answer, num_input_tokens, num_output_tokens = future.result(timeout=timeout)
+                    except FuturesTimeoutError:
+                        log(f"Generation timed out after {timeout}s for request from {sender[:8]}...", self.peer_id, msg_type="warning")
+                        time.sleep(0.5)
+                        continue
+                    except Exception as e:
+                        log(f"Generation failed for request from {sender[:8]}...: {e}", self.peer_id, msg_type="warning")
+                        time.sleep(0.5)
+                        continue
                     log(f"To {sender[:8]}...: {answer}", self.peer_id, msg_type="text")
 
                     # If the requester asked for a title, generate one with the same expert
@@ -1167,8 +1175,7 @@ class Peer:
 
             if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
 
-                model_utils = self.models[selected_model[1]]
-                future = self.generation_executor.submit(self.generate_answer, prompt, model_utils)
+                future = self.model_executor.submit(model_worker.generate, selected_model[1], prompt, self.max_answer_length)
 
                 try:
                     answer, num_input_tokens, num_output_tokens = future.result(timeout=timeout)
@@ -1263,18 +1270,6 @@ class Peer:
         except Exception as e:
             log(f"Error in _continue_handle_user_input: {e}", self.peer_id, msg_type="warning")
 
-    def generate_answer(self, message, model_utils, max_new_tokens=None):
-        encoding = model_utils['tokenizer'](message, return_tensors='pt').to(self.device)
-        input_ids = encoding['input_ids']
-        num_input_tokens = int(input_ids.shape[1])
-        if max_new_tokens is None:
-            max_new_tokens = self.max_answer_length
-        out = redirect_prints_safe(model_utils['model'].generate, input_ids=input_ids, max_new_tokens=max_new_tokens)
-        new_tokens = out[0, num_input_tokens:]
-        answer = model_utils['tokenizer'].decode(new_tokens, skip_special_tokens=True)
-        num_output_tokens = int(new_tokens.shape[0])
-        return answer, num_input_tokens, num_output_tokens
-
     def stop_node(self, timeout=5):
         """Stop the AXL node subprocess deterministically and idempotently.
 
@@ -1354,7 +1349,7 @@ class Peer:
     def _summarize(self, sum_prompt, max_chars, model_idx=0):
         max_tokens = max(20, min(self.max_answer_length, max_chars // 3 + 10))
         try:
-            future = self.generation_executor.submit(self.generate_answer, sum_prompt, self.models[model_idx], max_tokens)
+            future = self.model_executor.submit(model_worker.generate, model_idx, sum_prompt, max_tokens)
             summary, _, _ = future.result(timeout=120)
         except Exception as e:
             log(f"Summarisation failed: {e}", self.peer_id, msg_type="warning")
@@ -1466,9 +1461,7 @@ class Peer:
             f"Title:"
         )
         try:
-            future = self.generation_executor.submit(
-                self.generate_answer, title_prompt, self.models[model_idx], 20  # max_new_tokens
-            )
+            future = self.model_executor.submit(model_worker.generate, model_idx, title_prompt, 20)
             title, _, _ = future.result(timeout=60)
         except Exception as e:
             log(f"Title generation failed: {e}", self.peer_id, msg_type="warning")

@@ -1,4 +1,4 @@
-import ipaddress, time, io, struct, os, uuid, threading, json, contextlib, io, warnings, statistics
+import ipaddress, time, io, struct, os, sys, uuid, threading, json, contextlib, io, warnings, statistics
 from copy import deepcopy
 
 import torch
@@ -13,6 +13,18 @@ from termcolor import colored
 from collections import deque
 
 _tqdm.set_lock(threading.RLock())
+
+# Model loading/generation run on background threads, but heavy CPU-bound
+# PyTorch/HF work there can still starve the main thread's Textual event loop
+# under the GIL — it only gets released between bytecode "ticks". Shortening
+# the switch interval (default 5ms) makes the interpreter check for a thread
+# switch far more often, so the UI thread gets scheduled promptly even while
+# a background thread is deep in a long CPU-bound call.
+sys.setswitchinterval(0.001)
+
+# Cap PyTorch's intra-op thread pool so model loading/generation don't
+# saturate every CPU core — leaves headroom for the main/UI thread to run.
+torch.set_num_threads(max(1, (os.cpu_count() or 2) - 1))
 
 IR3DE_STATS_REPO_ID = "Erosinho/IR3DE-stats"
 
@@ -474,7 +486,7 @@ def redirect_prints_safe(func, *args, **kwargs):
         os.close(saved_stderr)
 
 
-def ensure_stats_file(path: str) -> str:
+def ensure_stats_file(path: str, peer_id: str) -> str:
     """Return `path`, downloading it from the IR3DE-stats HF repo into its
     parent directory first if it isn't present locally yet."""
     if os.path.isfile(path):
@@ -483,7 +495,7 @@ def ensure_stats_file(path: str) -> str:
     filename = os.path.basename(path)
     local_dir = os.path.dirname(path) or "."
     log(f"Stats file '{path}' not found locally; downloading '{filename}' from "
-        f"'{IR3DE_STATS_REPO_ID}'...", "SYSTEM", msg_type=None)
+        f"'{IR3DE_STATS_REPO_ID}'...", peer_id, msg_type=None)
     return hf_hub_download(repo_id=IR3DE_STATS_REPO_ID, filename=filename, local_dir=local_dir)
 
 

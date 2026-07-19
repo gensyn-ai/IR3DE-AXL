@@ -1,13 +1,23 @@
 import os, sys, signal, traceback, argparse, threading, time
- 
+from multiprocessing import resource_tracker
+
 from peer import Peer
 from utils import log, ACTIVATE_UI
- 
+
 from ui.ui import IR3DEApp
 from ui.ui_utils import disable_input, enable_input, disable_filters, enable_filters
 
 
 os.environ.setdefault("COLORTERM", "truecolor")
+
+# Peer spawns a ProcessPoolExecutor (model_worker) from a background thread.
+# The first multiprocessing sync primitive created in a process lazily forks+
+# execs a resource_tracker helper; doing that for the first time *after*
+# Textual's event loop is already running crashes with `ValueError: bad
+# value(s) in fds_to_keep` (same class of issue as the tqdm/mp-lock bug fixed
+# earlier). Warming it up here, before app.run() starts the event loop, avoids
+# it entirely — verified by direct reproduction.
+resource_tracker.ensure_running()
 
  
 def get_args():
