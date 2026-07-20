@@ -1427,6 +1427,7 @@ class IR3DEApp(App):
         for chat_id, chat in self.peer.chats.items():
             if chat_id in open_ids and not chat.get("messages"):
                 tabbed.active = f"tab-chat-{chat_id}"
+                self.call_after_refresh(self._resize_tabs_then_scroll_to_end)
                 return
 
         # 2. Closed (in peer.chats but no tab) empty chat -> reopen it.
@@ -1435,6 +1436,7 @@ class IR3DEApp(App):
                 self._mount_chat_tab(chat_id, chat)
                 self.peer.active_chat_id = chat_id
                 tabbed.active = f"tab-chat-{chat_id}"
+                self.call_after_refresh(self._resize_tabs_then_scroll_to_end)
                 return
 
         # 3. Nothing to reuse — create a fresh chat.
@@ -1442,6 +1444,7 @@ class IR3DEApp(App):
         chat = self.peer.chats[chat_id]
         self._mount_chat_tab(chat_id, chat)
         tabbed.active = f"tab-chat-{chat_id}"
+        self.call_after_refresh(self._resize_tabs_then_scroll_to_end)
 
     def _close_chat_tab(self, chat_id: str) -> None:
         if self.peer is None or chat_id not in self.peer.chats:

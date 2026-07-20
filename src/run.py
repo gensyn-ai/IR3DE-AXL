@@ -221,6 +221,13 @@ def main():
         _install_tui_node_cleanup(app)   # stop the node on SIGHUP (window close / SSH drop) and SIGTERM
         try:
             app.run()
+        except KeyboardInterrupt:
+            # A raw Ctrl+C that escaped Textual's own "ctrl+c" binding (e.g.
+            # landing while the terminal is briefly out of raw mode). This is
+            # a normal user-initiated shutdown, not a crash: stop the node
+            # and exit quietly instead of dumping a stack trace.
+            if app.peer is not None:
+                app.peer.stop_node()
         except Exception:
             os.makedirs("logs", exist_ok=True)
             if app.peer is not None:
@@ -239,4 +246,7 @@ def main():
 
  
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
