@@ -1,5 +1,5 @@
+from textual.events import MouseDown, MouseMove, MouseUp
 from textual.widgets import Static
-from textual.events import MouseDown, MouseUp, MouseMove
 
 
 class ResizableDivider(Static):
@@ -9,10 +9,12 @@ class ResizableDivider(Static):
     MIN_PANE_WIDTH = 20    # don't let either pane shrink below this
 
     def __init__(self, **kwargs):
+        """Create the divider between #left-pane and #right-pane, not yet dragging."""
         super().__init__(**kwargs)
         self._dragging = False
 
     def on_mouse_down(self, event: MouseDown) -> None:
+        """Start a drag: freeze both panes' widths in cells and capture the mouse."""
         # Pin both panes to their current pixel widths so subsequent
         # adjustments work in concrete cells, not fr units.
         app = self.app
@@ -26,12 +28,14 @@ class ResizableDivider(Static):
         event.stop()
 
     def on_mouse_up(self, event: MouseUp) -> None:
+        """End the drag and release the mouse capture."""
         if self._dragging:
             self._dragging = False
             self.release_mouse()
             event.stop()
 
     def on_mouse_move(self, event: MouseMove) -> None:
+        """While dragging, resize both panes to follow the cursor."""
         if not self._dragging:
             return
 

@@ -1,16 +1,31 @@
-import ipaddress, time, io, struct, os, sys, uuid, threading, json, contextlib, io, warnings, statistics
+import argparse
+import contextlib
+import io
+import ipaddress
+import json
+import os
+import signal
+import statistics
+import struct
+import sys
+import threading
+import uuid
+import warnings
+from collections import deque
 from copy import deepcopy
 
-import torch
 import numpy as np
-from tqdm import tqdm as _tqdm
-
+import torch
+from huggingface_hub import hf_hub_download
+from huggingface_hub.utils import EntryNotFoundError
+from rich.text import Text
+from safetensors import safe_open
+from termcolor import colored
 from textual.widgets import RichLog
+from tqdm import tqdm as _tqdm
+from transformers import AutoModelForCausalLM
 
 import chats
-from rich.text import Text
-from termcolor import colored
-from collections import deque
 
 _tqdm.set_lock(threading.RLock())
 
@@ -42,19 +57,26 @@ _filter_predicate = lambda msg_type: True
 
  
 def set_log_widget(widget):
+    """Register the Logs tab's RichLog as log()'s target for left-side entries.
+    Called once from IR3DEApp.on_mount."""
     global _log_widget
     _log_widget = widget
 
 
 def set_output_widget(chat_id: str, widget) -> None:
+    """Register a chat's RichLog as log()'s target for that chat's right-side
+    entries. Called from IR3DEApp._mount_chat_tab when a chat tab is opened."""
     _output_widgets[chat_id] = widget
 
 
 def unset_output_widget(chat_id: str) -> None:
+    """Drop a chat's output widget registration when its tab closes.
+    Called from IR3DEApp._close_chat_tab/_delete_chat."""
     _output_widgets.pop(chat_id, None)
 
 
 def get_output_widget(chat_id: str):
+    """The RichLog currently registered for a chat_id, or None if its tab isn't open."""
     return _output_widgets.get(chat_id)
 
  
@@ -113,7 +135,7 @@ AGENT_SYSTEM_PROMPT = (
 
 
 SUMMARY_SYSTEM_PROMPT = (
-    "You are a summariser. Produce a concise factual summary of the "
+    "You are a summarizer. Produce a concise factual summary of the "
     "conversation excerpt below in at most {max_chars} characters. "
     "Capture key topics, decisions, named entities, and any context "
     "later turns might need. Do not invent details. Output ONLY the "
@@ -149,18 +171,21 @@ def format_prompt_for_expert(chat: dict) -> str:
 
 
 def set_filter_predicate(fn):
+    """Register the msg_type -> bool predicate log() consults for left-side
+    entries. Set to IR3DEApp._should_show_log in IR3DEApp.on_mount."""
     global _filter_predicate
     _filter_predicate = fn
 
 
 def iter_log_buffer():
-    """Thread-safe snapshot iteration for re-rendering."""
+    """Thread-safe snapshot iteration for re-rendering. Used by
+    IR3DEApp._rerender_logs when the Logs tab's filters change."""
     with _log_lock:
         return list(_log_buffer)
-    
- 
-def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
 
+
+def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    """Parse a '#rgb' or '#rrggbb' string into an (r, g, b) tuple."""
     hex_color = hex_color.lstrip("#")
 
     if len(hex_color) == 3:
@@ -177,6 +202,13 @@ def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
 
 
 def log(message, node_id, msg_type=None, msg_id=None, right=False, chat_id=None):
+    """Central logging entry point, called throughout peer.py, run.py, and
+    the UI. Two destinations depending on `right`: False (default) writes to
+    the Logs tab via the widget set by set_log_widget, filtered by
+    set_filter_predicate; True writes to a specific chat's transcript via
+    the widget registered for `chat_id` in set_output_widget. Every entry is
+    also kept in _log_buffer so the Logs tab can be re-filtered without
+    losing history."""
 
     current_time = time.strftime('%H:%M:%S') + f".{int(time.time() * 1000) % 1000:03d}"
 
@@ -262,10 +294,17 @@ ARRAY_PREFIX = "__array_"
 
 
 def serialize_safe(obj, orig_msg_id, msg_id, msg_type, pk_from, pk_to):
+    """Pack an object (tensors/ndarrays included) into one or more chunked,
+    length-prefixed byte packets under AXL's 16 MiB message limit. Used by
+    Peer.send(..., large=True) to transmit IR3DE stats between peers; each
+    chunk is sent separately and reassembled by deserialize_safe on the
+    receiving end. Returns (packets, chunk_msg_ids)."""
     arrays = {}
     counter = 0
 
     def encode(x):
+        """Recursively replace tensors/ndarrays with name references into
+        `arrays`, leaving everything else (dicts, lists, plain values) as-is."""
         nonlocal counter
 
         if isinstance(x, torch.Tensor):
@@ -331,6 +370,10 @@ def serialize_safe(obj, orig_msg_id, msg_id, msg_type, pk_from, pk_to):
 
 
 def deserialize_safe(chunks):
+    """Reassemble the packets produced by serialize_safe back into the
+    original object, after validating they all belong together and no chunk
+    is missing/duplicated. Called by Peer.recv_loop once every chunk for a
+    message has arrived."""
     if not chunks:
         raise ValueError("No chunks provided")
 
@@ -411,6 +454,8 @@ def deserialize_safe(chunks):
         structure = json.loads(metadata_bytes.decode("utf-8"))
 
         def decode(x):
+            """Inverse of encode: resolve name references back into
+            tensors/ndarrays, recursing through dicts and lists."""
             if isinstance(x, dict) and x.get("__type__") == "tensor":
                 return torch.from_numpy(loaded[x["name"]])
 
@@ -431,7 +476,10 @@ def deserialize_safe(chunks):
 
 
 def deserialize_chunk_header(packet):
-    
+    """Parse just one packet's header (not its payload) — used by
+    Peer.recv_loop to route/track an incoming chunk before the full message
+    has been reassembled."""
+
     if len(packet) < 4:
         raise ValueError("Invalid packet: too short")
 
@@ -448,6 +496,8 @@ def deserialize_chunk_header(packet):
 
 
 def format_params(n: int) -> str:
+    """Format a parameter count for display, e.g. 1234567 -> '1.23M'. Used
+    by the Statistics tab's models table and latency plot."""
     if n >= 1e9:  return f"{n / 1e9:.2f}B"
     if n >= 1e6:  return f"{n / 1e6:.2f}M"
     if n >= 1e3:  return f"{n / 1e3:.2f}K"
@@ -455,6 +505,8 @@ def format_params(n: int) -> str:
 
 
 def symbol_for_tag(tag: str) -> str:
+    """Pick a display glyph for an expertise tag by keyword match, for the
+    Control Panel's tag buttons and expertise sections."""
     t = tag.lower()
     for keywords, symbol in _TAG_SYMBOL_RULES:
         if any(kw in t for kw in keywords):
@@ -491,7 +543,6 @@ def ensure_stats_file(path: str, peer_id: str) -> str:
     parent directory first if it isn't present locally yet."""
     if os.path.isfile(path):
         return path
-    from huggingface_hub import hf_hub_download
     filename = os.path.basename(path)
     local_dir = os.path.dirname(path) or "."
     log(f"Stats file '{path}' not found locally; downloading '{filename}' from "
@@ -511,10 +562,6 @@ def load_embedder_only(model_name: str) -> torch.nn.Embedding:
     avoidable overhead. Falls back to the full-model load if the checkpoint
     doesn't use a recognized safetensors layout.
     """
-    from huggingface_hub import hf_hub_download
-    from huggingface_hub.utils import EntryNotFoundError
-    from safetensors import safe_open
-
     try:
         try:
             index_path = hf_hub_download(model_name, "model.safetensors.index.json")
@@ -534,7 +581,6 @@ def load_embedder_only(model_name: str) -> torch.nn.Embedding:
     except Exception as e:
         log(f"Fast embedder-only load failed for '{model_name}' ({e}); "
             f"falling back to loading the full model.", "SYSTEM", msg_type="warning")
-        from transformers import AutoModelForCausalLM
         model = redirect_prints_safe(AutoModelForCausalLM.from_pretrained, model_name)
         embedder = deepcopy(model.model.embed_tokens).to(torch.float32)
         del model
@@ -572,3 +618,138 @@ def render_chat_history_into(chat: dict, widget) -> None:
             line.append("(failed) ", style="bold red")
         line.append(m.get("text", ""), style="#ffffff")
         widget.write(line)
+
+
+# ───────────────────────── run.py support ─────────────────────────
+# The functions below back run.py's entry point (get_args, main, run_peer)
+# but don't need to live there themselves — they're generic argument
+# parsing and process/signal-cleanup helpers with no dependency on Peer or
+# IR3DEApp beyond the objects passed to them.
+
+def get_args():
+    """Parse this peer's CLI flags: AXL node identity, gossip/timing
+    intervals, IR3DE routing parameters, and which tokenizer/embedder pair
+    (--tok-type) this peer is active for."""
+    parser = argparse.ArgumentParser(description="Test one peer locally")
+    parser.add_argument("--peer-id", type=int, required=False, default=None,
+                        help="Which simulated local node to run, matching a "
+                             "local_nodes/configNN.json/metadataNN.json pair "
+                             "created by scripts/add_local_node.sh. Omit to "
+                             "run the default local peer (local_nodes/config.json).")
+    parser.add_argument("--discover-peers-interval", type=int, default=60,
+                        help="Seconds between rounds of greeting a random "
+                             "sample of known peers to discover the network.")
+    parser.add_argument("--check-acks-interval", type=int, default=100,
+                        help="Seconds between checking for expired "
+                             "(un-acked) sent messages and pruning peers "
+                             "that have gone silent.")
+    parser.add_argument("--greeting-timeout", type=int, default=60,
+                        help="Timeout in seconds for each greeting message "
+                             "sent to a peer during discovery.")
+    parser.add_argument("--knowledge-timeout", type=int, default=60,
+                        help="Timeout in seconds for each known-peers "
+                             "gossip message sent to a peer.")
+    parser.add_argument("--ack-timeout", type=int, default=60,
+                        help="Seconds to wait for an ACK before considering "
+                             "a sent message expired.")
+    parser.add_argument("--share-knowledge-interval", type=int, default=30,
+                        help="Seconds between rounds of gossiping this "
+                             "peer's known-peers list to a random sample of them.")
+    parser.add_argument("--num-peers-to-greet", type=int, default=5,
+                        help="How many random known peers to greet each "
+                             "discovery round.")
+    parser.add_argument("--num-peers-to-share", type=int, default=5,
+                        help="How many random known peers to gossip "
+                             "knowledge/models-info/stats-info to each round.")
+    parser.add_argument("--share-info-interval", type=int, default=60,
+                        help="Seconds between rounds of sharing this peer's "
+                             "local model/stats metadata (not the stats "
+                             "matrices themselves) with the network.")
+    parser.add_argument("--share-stats-interval", type=int, default=60,
+                        help="Seconds between rounds of asking the network "
+                             "for IR3DE stats matrices matching this peer's "
+                             "active tokenizer/embedder.")
+    parser.add_argument("--stats-timeout", type=int, default=120,
+                        help="Timeout in seconds for stats-sharing/"
+                             "requesting messages (stats payloads can be "
+                             "large and chunked).")
+    parser.add_argument("--ir3de-lambda", type=float, default=0.01,
+                        help="Ridge-regression regularization strength used "
+                             "when building the IR3DE token router.")
+    parser.add_argument("--ir3de-entropy-top-k", type=int, default=10,
+                        help="Number of lowest-entropy tokens in the user's "
+                             "message to vote on when picking its routed tag.")
+    parser.add_argument("--max-answer-length", type=int, default=256,
+                        help="Maximum number of new tokens an expert may "
+                             "generate per answer.")
+    parser.add_argument("--answer-timeout", type=int, default=300,
+                        help="Seconds to wait for an expert's answer (local generation or a "
+                             "remote peer's reply) before giving up.")
+    parser.add_argument( "--num-characters-conversation-history", type=int, default=1000,
+                        help="Maximum character budget for the prompt sent to experts (system "
+                             "prompt + summary + history). When exceeded, oldest user/agent pairs "
+                             "are summarized. Set to 0 to disable.")
+    parser.add_argument('--tok-type', type=str, default='mistral', choices=['llama', 'mistral'], help='Type of tokenizer to use')
+    return parser.parse_args()
+
+
+def _install_node_signal_cleanup(peer):
+    """Headless mode (ACTIVATE_UI=False, main thread): stop the AXL node on
+    SIGTERM/SIGHUP so an externally-killed peer process doesn't leave an
+    orphaned node. The text UI (TUI) has its own variant,
+    _install_tui_node_cleanup; Ctrl+C is handled separately (headless:
+    KeyboardInterrupt -> run_peer; TUI: action_quit).
+    """
+    def _handler(signum, frame):
+        """Stop the node and exit with the conventional 128+signum code."""
+        peer.stop_node()
+        sys.stdout.flush()
+        os._exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError, AttributeError):
+            # Not the main thread, or signal unavailable on this platform.
+            pass
+
+
+def _install_tui_node_cleanup(app):
+    """Text UI mode (main thread): stop the AXL node on SIGTERM/SIGHUP — the
+    catchable exits Textual's Ctrl+C handling doesn't cover. Closing the
+    terminal window or an SSH drop delivers SIGHUP; an external kill/pkill/
+    IDE-stop delivers SIGTERM. Installed before app.run(). Stops the node
+    directly, then asks Textual to exit so the terminal is restored; falls
+    back to SystemExit if app.exit() can't run. The window before app.peer
+    is set is covered by the Peer's atexit (registered when the node spawns).
+    """
+    def _handler(signum, frame):
+        """Stop the node, then ask Textual to exit cleanly."""
+        peer = getattr(app, "peer", None)
+        if peer is not None:
+            peer.stop_node()
+        try:
+            app.exit()
+        except Exception:
+            raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _handler)
+        except (ValueError, OSError, AttributeError):
+            # Not the main thread, or signal unavailable on this platform.
+            pass
+
+
+def handle_input(app, args, user_input):
+    """The TUI's input_handler: log the user's message into its chat, show
+    the "waiting for answer" indicator, and dispatch it to the peer. Run on
+    its own background thread per submission, spawned from
+    IR3DEApp.on_submittable_text_area_submitted."""
+    chat_id = getattr(app.peer, "active_chat_id", None)
+    log(f"{user_input}", node_id="USER", msg_type=None, right=True, chat_id=chat_id)
+    app.call_from_thread(app.start_waiting_for_answer, chat_id)
+    try:
+        app.peer.handle_user_input(user_input, timeout=args.answer_timeout)
+    finally:
+        app.call_from_thread(app.maybe_stop_waiting_for_answer, chat_id)

@@ -1,17 +1,47 @@
-import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit, threading
-import multiprocessing
+"""The Peer class: one node in the IR3DE-AXL P2P network. Not run directly —
+constructed by run.py, which owns the background threads that drive it
+(recv_loop for inbound messages, and the periodic gossip loop in run_peer).
 
-import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer
+A Peer wraps three things:
+  - The AXL node: a Go P2P subprocess (started in __init__) reached over a
+    local HTTP API for sending/receiving messages and reading topology.
+  - IR3DE routing: builds a ridge-regression router from local + gossiped
+    per-tag (A, b) stats matrices (get_token_router), used to pick which
+    expert model should answer a given user message (find_best_tag,
+    find_best_model), for whichever tags the user has selected.
+  - Chats: this peer's own conversation history (via chats.py), including
+    dispatching user messages to local or remote experts
+    (handle_user_input) and summarizing older turns once a chat exceeds its
+    character budget (_ensure_within_budget).
+
+Expert models themselves are loaded and run in a separate OS process (see
+model_worker.py) reached through self.model_executor, not in this process.
+"""
+
+import atexit
+import json
+import multiprocessing
+import os
+import pathlib
+import random
+import signal
+import subprocess
+import threading
+import time
+import uuid
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
+import requests
+import torch
+import torch.nn.functional as F
+from transformers import AutoTokenizer
+
 import chats
 import model_worker
-from utils import (ipv6_from_pubkey, log, serialize_safe, deserialize_safe,
-                   deserialize_chunk_header, format_prompt_for_expert, SUMMARY_SYSTEM_PROMPT,
-                   TITLE_SYSTEM_PROMPT, MAX_TITLE_CHARS, ensure_stats_file, load_embedder_only)
+from utils import (deserialize_chunk_header, deserialize_safe, ensure_stats_file,
+                    format_prompt_for_expert, ipv6_from_pubkey, load_embedder_only, log,
+                    MAX_TITLE_CHARS, serialize_safe, SUMMARY_SYSTEM_PROMPT, TITLE_SYSTEM_PROMPT)
 
 
 AXL = "http://127.0.0.1:91"
@@ -39,7 +69,11 @@ class Peer:
 
     def __init__(self, peer_id, ir3de_lambda=0.01, ir3de_entropy_top_k=10, max_answer_length=256,
                  num_characters_conversation_history=8000, on_axl_ready=None, tokenizer_name="mistralai/Mistral-7B-v0.1"):
-        
+        """Start this peer's AXL node subprocess, load its expert models and
+        matching IR3DE stats, and load (or create) its chats. Constructed
+        once by run.py's run_peer on a background thread; blocks for several
+        seconds while the AXL node comes up and models load."""
+
         with open(f"ir3de_stats/default_stats.json", "r") as f:
             default_stats = json.load(f)
 
@@ -92,25 +126,12 @@ class Peer:
         self.selected_models: dict[str, tuple[str, int]] = {}
         self.default_tokenizer_name = self.default_embedder_name = tokenizer_name
 
-        # Expert models are loaded and generate() runs entirely inside this
-        # worker process, never in-process here — a single long C call inside
-        # from_pretrained()/generate() can hold the GIL for its whole
-        # duration no matter how thread priorities are tuned, freezing the
-        # Textual UI if it ran in this process, even on a background thread.
-        # A separate process has its own GIL, so the OS scheduler keeps the
-        # main process's event loop responsive regardless of what this one
-        # is doing. atexit-registered since a ProcessPoolExecutor spawns a
-        # real OS process that must be torn down on exit.
-        #
-        # mp_context="spawn": this process may already have touched CUDA by
-        # the time the pool is created (e.g. torch.cuda.is_available() just
-        # above). The default start method on Linux is "fork", which clones
-        # this process's memory — including any live CUDA context — into
-        # the worker. CUDA contexts cannot survive a fork (NVIDIA's driver
-        # forbids it: "Cannot re-initialize CUDA in forked subprocess").
-        # "spawn" launches a genuinely fresh interpreter instead, so the
-        # worker initializes its own CUDA context from scratch, independent
-        # of whatever this process has already done.
+        # Models load/generate in model_worker's own process (see its module
+        # docstring for why). mp_context="spawn" because this process may
+        # already hold a CUDA context by now (e.g. torch.cuda.is_available()
+        # above) — the default "fork" start method would clone that context
+        # into the worker, which CUDA doesn't allow. atexit-registered since
+        # the pool is a real OS process that must be torn down on exit.
         self.model_executor = ProcessPoolExecutor(
             max_workers=1,
             initializer=model_worker.init_worker,
@@ -203,12 +224,18 @@ class Peer:
         atexit.register(self._save_all_chats_safely)
     
     def get_topology(self, session):
+        """Fetch this node's AXL topology (public key, IPv6, known peers)
+        once at startup, right after the node subprocess comes up."""
         resp = session.get(f"{AXL}{self._axl_suffix}/topology", timeout=5)
         resp.raise_for_status()
         topology = resp.json()
         return topology
 
     def get_models_info(self):
+        """Load every model listed in this peer's metadata.json (via
+        model_worker, in the separate model_executor process) and collect
+        their tags. Called once from __init__; feeds the Statistics tab's
+        local models table and the Control Panel's expertise sections."""
         models = []
         for i, model_info in enumerate(self.models_info):
             display_name = model_info.get("hf_name", "unknown")
@@ -230,7 +257,10 @@ class Peer:
         return models
 
     def get_stats_info(self):
-
+        """Download (if needed) and load every stats entry in self.stats_info
+        that matches this peer's active tokenizer/embedder, deduplicating
+        shared tokenizer/embedder loads. Called once from __init__, after
+        which self.local_A/local_b are built from the result."""
         all_stats = []
         valid_stats_info = []  # kept in lockstep with all_stats; entries that fail to
                                 # load (even after a re-download) are dropped from both,
@@ -281,6 +311,10 @@ class Peer:
         return all_stats
 
     def send(self, message, peer_public_key, timeout=5, large=False):
+        """POST one JSON message to a peer via the local AXL node. If
+        `large`, chunk it through serialize_safe instead (used for IR3DE
+        stats payloads, which can exceed AXL's message-size limit). Returns
+        whether the send succeeded; never raises."""
         try:
             if not large:
                 self.session.post(
@@ -321,6 +355,9 @@ class Peer:
         return True
 
     def new_peer_discovered(self, msg, sender):
+        """Register a not-yet-known public key as a peer, starting its
+        liveness clock. Called from recv_loop's greeting/knowledge/info/
+        stats-req handlers whenever `sender` isn't already in known_public_keys."""
         log(f"New node discovered with ID = {msg.get('peer_id')}!", self.peer_id, msg_type="newnode")
         self.known_public_keys[sender] = {}
         self.known_public_keys[sender]["peer_id"] = msg.get("peer_id")
@@ -328,7 +365,11 @@ class Peer:
         self.last_seen[sender] = time.time()  # start the liveness clock at discovery
 
     def recv_loop(self, timeout=120):
-
+        """Poll the AXL node for inbound messages and dispatch each by type
+        (text/answer/summary/greeting/knowledge/info/stats-req/*-ack). Runs
+        forever on its own daemon thread, started by run.py's run_peer right
+        after Peer() is constructed. Self-heals if the AXL node goes down,
+        and never lets one bad message kill the loop."""
         node_unreachable = False
 
         while True:
@@ -715,7 +756,10 @@ class Peer:
             time.sleep(0.5)
 
     def send_greetings(self, num_peers_to_greet=5, timeout=5):
-        
+        """Greet a random sample of known/topology peers to discover the
+        network and measure comm latency. Called periodically from run.py's
+        run_peer loop, on the --discover-peers-interval schedule."""
+
         log(f"Discovering peers in the network...", self.peer_id, msg_type=None)
         
         if self.topology['peers'] is None and len(self.known_public_keys) == 0:
@@ -764,7 +808,10 @@ class Peer:
         log(f"Sent greetings to {greetings_sent} known peers.", self.peer_id, msg_type='greeting')
 
     def share_knowledge(self, num_peers_to_share=5, timeout=5):
-        
+        """Gossip this peer's known-peers list to a random sample of them,
+        so peer discovery propagates transitively. Called periodically from
+        run.py's run_peer loop, on the --share-knowledge-interval schedule."""
+
         log(f"Sharing known peers with the network...", self.peer_id, msg_type='knowledge')
         known_pks = list(self.known_public_keys.keys())
         random.shuffle(known_pks)
@@ -802,6 +849,10 @@ class Peer:
         log(f"Shared knowledge with {knowledge_shared} peers.", self.peer_id, msg_type='knowledge')
     
     def check_acks(self, timeout=30):
+        """Time out anything in awaiting_acks past `timeout` seconds (marking
+        failed user messages, unblocking stalled summary continuations) and
+        prune peers that have gone silent for too long. Called periodically
+        from run.py's run_peer loop, on the --check-acks-interval schedule."""
         current_time = time.time()
         expired_acks = [msg_id for msg_id, info in self.awaiting_acks.items()
                         if current_time - info['timestamp'] > timeout]
@@ -867,7 +918,10 @@ class Peer:
             self.peer_id, msg_type="warning")
 
     def share_stats_and_models_info(self, num_peers_to_share=5, timeout=5):
-
+        """Push this peer's model/stats metadata (tags, sizes, dataset names
+        — not the stats matrices themselves) to a random sample of known
+        peers. Called periodically from run.py's run_peer loop, on the
+        --share-info-interval schedule."""
         log(f"Sharing IR3DE local stats and local models info with the network...", self.peer_id, msg_type='info')
         known_pks = list(self.known_public_keys.keys())
         random.shuffle(known_pks)
@@ -915,7 +969,11 @@ class Peer:
             
 
     def ask_stats(self, num_peers_to_ask=5, timeout=5):
-
+        """Request the actual IR3DE stats matrices from known peers that
+        advertised matching tokenizer/embedder stats we haven't asked for
+        yet. Called periodically from run.py's run_peer loop, on the
+        --share-stats-interval schedule; answered by share_stats on the
+        receiving peer."""
         log(f"Asking for IR3DE stats from the network...", self.peer_id, msg_type='stats-req')
         known_pks = list(self.known_public_keys.keys())
         known_pks = [pk for pk in known_pks if "stats_info" in self.known_public_keys[pk] and len(self.known_public_keys[pk]["stats_info"]) > 0] # Filter only peers that have shared stats info, since asking for stats to peers that haven't shared stats info would be pointless. In the future, we might want to allow asking for stats even to peers that haven't shared stats info, in case they have the stats but just haven't shared them for some reason.
@@ -960,7 +1018,10 @@ class Peer:
         log(f"Asked for IR3DE stats from {stats_asked} peers.", self.peer_id, msg_type='stats-req')
 
     def share_stats(self, orig_msg_id, tokenizer_name, embedder_name, sender, timeout=5):
-        
+        """Reply to a "stats-req" with this peer's stats matching the
+        requested tokenizer/embedder, chunked via send(..., large=True).
+        Called from recv_loop's "stats-req" handler."""
+
         stats_to_share = []
         
         for stats_info, stats in zip(self.stats_info, self.stats):
@@ -990,7 +1051,12 @@ class Peer:
         log(f"Shared stats with {sender[:8]}... in response to stats request. msg_id = {msg_id}", self.peer_id, msg_type="stats", msg_id=msg_id)
 
     def get_token_router(self):
-        
+        """Build the ridge-regression router (a Linear layer) from the
+        combined local + known-peers IR3DE stats for the currently-selected
+        tags. Called from handle_user_input before routing a message; its
+        output feeds find_best_tag. Returns None (after logging why) if no
+        stats are available yet for the selected tags."""
+
         identifier = (self.default_tokenizer_name, self.default_embedder_name)
         ref_stats = None
         for stats_info, stats in zip(self.stats_info, self.stats):
@@ -1066,6 +1132,10 @@ class Peer:
 
 
     def find_best_tag(self, router, tokenizer, embedder, tags, user_input):
+        """Embed the user's input, route it through `router`, and pick the
+        tag with lowest-entropy (most confident) prediction across the
+        input's tokens. Called from handle_user_input with get_token_router's
+        output; its result feeds find_best_model."""
         input_ids = tokenizer(user_input, return_tensors="pt").input_ids.to(self.device)
         X = embedder(input_ids)
         batch_size = X.size(0)
@@ -1078,16 +1148,18 @@ class Peer:
         _, idx = torch.topk(entropy, k=k, largest=False, dim=1)
         mask = torch.zeros_like(entropy, dtype=torch.bool)
         mask.scatter_(1, idx, True)
-        # expand indices to match last dim
-        idx_expanded = idx.unsqueeze(-1).expand(-1, -1, router.out_features)     # (16, 10, 5)
-        # gather along dim=1
-        outputs = outputs.gather(1, idx_expanded)                             # (16, 10, 5)
+        idx_expanded = idx.unsqueeze(-1).expand(-1, -1, router.out_features)
+        outputs = outputs.gather(1, idx_expanded)
         predicted_tags = torch.argmax(outputs, dim=-1)
         assigned_tag = tags[predicted_tags.view(batch_size, -1).mode(dim=1)[0]]
         return assigned_tag
 
 
     def find_best_model(self, assigned_tag):
+        """Resolve the user's chosen model for `assigned_tag` (set via the
+        Control Panel's expertise sections, mirrored into
+        self.selected_models) into a validated (peer_pk, model_idx), bumping
+        its request counter. Called from handle_user_input after find_best_tag."""
         selected = self.selected_models.get(assigned_tag)
         if selected is None:
             log(f"No model selected for tag '{assigned_tag}'. Skipping.",
@@ -1125,9 +1197,14 @@ class Peer:
         return (peer_pk, model_idx)
 
     def _mark_answer_pending(self, chat_id) -> None:
+        """Increment chat_id's in-flight-answer count. Called once at the
+        top of handle_user_input, per dispatched message."""
         self.pending_answers[chat_id] = self.pending_answers.get(chat_id, 0) + 1
 
     def _mark_answer_resolved(self, chat_id) -> None:
+        """Decrement chat_id's in-flight-answer count, dropping the entry at
+        zero. Called at every terminal point a dispatched message can reach
+        (local generation done, remote ack received, timeout, error)."""
         if chat_id not in self.pending_answers:
             return
         self.pending_answers[chat_id] -= 1
@@ -1142,7 +1219,11 @@ class Peer:
         return self.pending_answers.get(chat_id, 0) > 0
 
     def handle_user_input(self, user_input, timeout=60):
-
+        """Route a submitted message to an expert (skipping routing if only
+        one model is selected overall) and dispatch it, deferring to a
+        remote summary first if the conversation exceeds its character
+        budget. Called from run.py's handle_input, on its own thread per
+        submission."""
         chat = self.get_active_chat()
         if chat is None:
             log("No active chat. Cannot handle user input.", self.peer_id, msg_type="warning")
@@ -1369,6 +1450,8 @@ class Peer:
         pid = proc.pid
 
         def _signal(sig):
+            """Send `sig` to the node's whole process group, falling back
+            to just its own pid if the group is gone or inaccessible."""
             try:
                 os.killpg(os.getpgid(pid), sig)
             except (ProcessLookupError, PermissionError):
@@ -1392,6 +1475,9 @@ class Peer:
             pass
 
     def __del__(self):
+        """Best-effort fallback node cleanup if this Peer is garbage
+        collected without an interpreter exit (stop_node is also registered
+        via atexit in __init__, which is the primary cleanup path)."""
         try:
             self.stop_node()
         except Exception:
@@ -1411,7 +1497,8 @@ class Peer:
                 chats.delete_chat(chat_id)
 
     def _text_to_summarize(self, existing_summary, trimmed_pairs, max_chars):
-
+        """Build the summarizer prompt from the trimmed (user, agent) pairs
+        and any existing summary. Called from _ensure_within_budget."""
         parts = [SUMMARY_SYSTEM_PROMPT.format(max_chars=max_chars), ""]
         if existing_summary:
             parts.append("Existing summary so far:")
@@ -1419,7 +1506,7 @@ class Peer:
             parts.append("")
             parts.append("Additional turns to fold into it:")
         else:
-            parts.append("Conversation to summarise:")
+            parts.append("Conversation to summarize:")
         for user_msg, agent_msg in trimmed_pairs:
             parts.append(f"User: {user_msg['text']}")
             parts.append(f"Agent: {agent_msg['text']}")
@@ -1430,21 +1517,28 @@ class Peer:
         return sum_prompt
 
     def _summarize(self, sum_prompt, max_chars, model_idx=0):
+        """Run the summarizer prompt through a local model and return the
+        result truncated to max_chars (or "" on failure). Called from
+        _ensure_within_budget (local path) and recv_loop's "summary-req"
+        handler (when this peer is asked to summarize for a remote peer)."""
         max_tokens = max(20, min(self.max_answer_length, max_chars // 3 + 10))
         try:
             future = self.model_executor.submit(model_worker.generate, model_idx, sum_prompt, max_tokens)
             summary, _, _ = future.result(timeout=120)
         except Exception as e:
-            log(f"Summarisation failed: {e}", self.peer_id, msg_type="warning")
+            log(f"Summarization failed: {e}", self.peer_id, msg_type="warning")
             return ""
         return summary.strip()[:max_chars]
 
     def _handle_summary(self, new_summary, chat, trimmed_pairs):
+        """Store a freshly-produced summary on `chat`. Called once a summary
+        is available, whether generated locally (_ensure_within_budget) or
+        received from a remote peer (recv_loop's "summary" handler)."""
         chats.set_summary(chat, new_summary)
         log(f"Summary updated ({len(new_summary)} chars covering {len(trimmed_pairs)} dropped pairs).", self.peer_id, msg_type="summary")
 
     def _ensure_within_budget(self, chat_id, selected_model, timeout=60) -> bool:
-        """Trim oldest user/agent couples and summarise them via the routed
+        """Trim oldest user/agent couples and summarize them via the routed
         expert if the prompt exceeds self.budget_chars.
 
         Returns True iff a *remote* summary request was just sent and the caller
@@ -1465,7 +1559,7 @@ class Peer:
             return False
 
         log(f"Conversation history ({current_size} chars) exceeds budget "
-            f"({self.budget_chars}). Trimming and summarising.",
+            f"({self.budget_chars}). Trimming and summarizing.",
             self.peer_id, msg_type="summary")
 
         target = int(0.8 * self.budget_chars)
@@ -1523,6 +1617,10 @@ class Peer:
         return True
 
     def _clean_title(self, title):
+        """Strip a raw model-generated title down to one line, no quotes,
+        at most 6 words and MAX_TITLE_CHARS characters. Called from
+        _generate_title and recv_loop's "answer" handler (for titles
+        generated by a remote expert)."""
         if not title:
             return ""
         title = title.strip().split("\n", 1)[0].strip().strip('"\'').strip()
@@ -1562,11 +1660,13 @@ class Peer:
         return cid
 
     def get_active_chat(self) -> dict | None:
+        """The chat the UI currently has selected, or None if none is active."""
         if self.active_chat_id is None:
             return None
         return self.chats.get(self.active_chat_id)
 
     def get_chat(self, chat_id: str) -> dict | None:
+        """Look up any of this peer's chats by id, active or not."""
         return self.chats.get(chat_id)
 
     def delete_chat(self, chat_id: str) -> bool:

@@ -1,24 +1,45 @@
-import os, random, threading, statistics
+"""IR3DEApp: the Textual TUI for one peer. Not run directly — constructed
+and run by run.py, which also drives the peer's background threads
+(run_peer, handle_input) via app.call_from_thread.
+
+Layout (see compose()):
+  - Left pane: a TabbedContent with Control Panel (pick expertise tags and
+    a model per tag), Statistics (known peers, local/remote models and
+    IR3DE stats, per-tag expert counts, latency plots), and Logs (the raw
+    message log, filterable by type).
+  - Right pane: one tab per chat, each with its own scrollable transcript
+    and the shared message input row at the bottom.
+
+Most of this module is reactive glue: periodic refreshers
+(_refresh_stats_tab and friends, on a 2s timer) resync the widgets to
+Peer state, and on_* handlers respond to clicks/messages from the
+components in ui/components/.
+"""
+
+import os
+import random
+import statistics
+import threading
 from datetime import datetime, timezone
 
+from rich.markup import escape as _md_escape
+from rich.text import Text as RichText
 from textual import events
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable
-from textual.widgets._tabs import Tab
-from textual.widgets._tabbed_content import ContentTabs
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import DataTable, RichLog, Static, TabbedContent, TabPane, TextArea
+from textual.widgets._tabbed_content import ContentTabs
+from textual.widgets._tabs import Tab
 from textual_plotext import PlotextPlot
-from rich.text import Text as RichText
-from rich.markup import escape as _md_escape
 
 import chats
 from peer import Peer
-from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
 from ui.components import *
-from ui.ui_utils import read_css, FollowTailLog
-from utils import (format_params, format_mean_std, set_log_widget, set_output_widget, log, MSG_TYPE_COLORS,
-                   set_filter_predicate, ipv6_from_pubkey, symbol_for_tag, MAX_TITLE_CHARS, render_chat_history_into,
-                   unset_output_widget, iter_log_buffer)
+from ui.glyphs import DIAMOND_FRAMES, DIAMOND_ROTATION, IR3DE_BANNER
+from ui.ui_utils import FollowTailLog, read_css
+from utils import (format_mean_std, format_params, ipv6_from_pubkey, iter_log_buffer, log,
+                    MAX_TITLE_CHARS, MSG_TYPE_COLORS, render_chat_history_into, set_filter_predicate,
+                    set_log_widget, set_output_widget, symbol_for_tag, unset_output_widget)
 
 
 class IR3DEApp(App):
@@ -26,6 +47,9 @@ class IR3DEApp(App):
     BINDINGS = [("ctrl+c", "quit", "Quit")]
 
     def __init__(self, args, logs_function, input_handler):
+        """Construct the app shell. `logs_function` (run.py's run_peer) and
+        `input_handler` (run.py's handle_input) are stashed for on_mount to
+        launch on background threads once the screen exists."""
         super().__init__()
         self.args = args
         self.peer: "Peer | None" = None
@@ -56,7 +80,9 @@ class IR3DEApp(App):
         self._waiting_timer = None
 
     def compose(self) -> ComposeResult:
-
+        """Lay out the whole screen: banner/bars, the left pane (Control
+        Panel/Statistics/Logs tabs), the resizable divider, and the right
+        pane (chat tabs + input row)."""
         yield Static("", id="top-divider")
         yield Static(IR3DE_BANNER, id="ir3de-banner")
         yield Static("", id="top-bar")
@@ -165,6 +191,8 @@ class IR3DEApp(App):
         original_scroll_up = ContentTabs._on_mouse_scroll_up
 
         def _on_mouse_scroll_down(tabs: ContentTabs, event: events.MouseScrollDown) -> None:
+            """Mouse wheel down on the chat tab bar scrolls it right; any
+            other TabbedContent keeps the normal vertical behavior."""
             if tabs.tabbed_content.id == "right-tabs":
                 if tabs.query_one("#tabs-scroll")._scroll_right_for_pointer(animate=False):
                     event.stop()
@@ -172,6 +200,8 @@ class IR3DEApp(App):
             original_scroll_down(tabs, event)
 
         def _on_mouse_scroll_up(tabs: ContentTabs, event: events.MouseScrollUp) -> None:
+            """Mouse wheel up on the chat tab bar scrolls it left; any
+            other TabbedContent keeps the normal vertical behavior."""
             if tabs.tabbed_content.id == "right-tabs":
                 if tabs.query_one("#tabs-scroll")._scroll_left_for_pointer(animate=False):
                     event.stop()
@@ -182,7 +212,10 @@ class IR3DEApp(App):
         ContentTabs._on_mouse_scroll_up = _on_mouse_scroll_up
 
     def on_mount(self):
-
+        """Post-compose setup: fill decorative bars, patch in horizontal tab
+        scrolling, wire up the Logs widget, set up the three Statistics
+        tables, launch the peer's background thread (logs_function), and
+        start the loading/spinner animation timers."""
         self._fill_bars()
         self._enable_horizontal_tab_scroll()
 
@@ -246,6 +279,8 @@ class IR3DEApp(App):
         self._control_spinner_timer = self.set_interval(0.1, self._tick_control_spinner)
 
     def _update_sort_arrows(self, table, columns, active_key, reverse):
+        """Relabel `table`'s headers, appending a ▲/▼ arrow to whichever
+        column is currently sorted. Shared by the peers/models/stats tables."""
         arrow = "▲" if reverse else "▼"
         for col_key, base in columns:
             suffix = f" {arrow}" if col_key == active_key else "  "
@@ -255,6 +290,9 @@ class IR3DEApp(App):
 
     
     def _refresh_peers_table(self):
+        """Rebuild the Statistics tab's Known Peers table (self + every
+        known_public_keys entry), preserving sort/scroll/selection. Called
+        every 2s by _refresh_stats_tab and after a row is clicked."""
         if self.peer is None:
             return
 
@@ -325,6 +363,8 @@ class IR3DEApp(App):
         )
 
     def _update_header_labels(self):
+        """Relabel the peers table's headers with a sort arrow (its columns
+        aren't in the generic _update_sort_arrows(columns=...) shape)."""
         table = self.query_one("#peers-table", DataTable)
         arrow = "▲" if self._sort_reverse else "▼"
         labels = {
@@ -338,6 +378,8 @@ class IR3DEApp(App):
         table.refresh()
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected):
+        """Clicking a column header sorts by it (toggling direction on a
+        repeat click), for whichever of the three Statistics tables it's in."""
         table_id = event.control.id if event.control else None
         if table_id == "peers-table":
             self._sort_reverse = not self._sort_reverse if event.column_key == self._sort_column_key else False
@@ -353,10 +395,14 @@ class IR3DEApp(App):
             self._refresh_ir3de_stats_table()
 
     def _should_show_log(self, msg_type) -> bool:
+        """Whether a log entry of this msg_type passes the Logs tab's
+        current filter set. Registered with utils.set_filter_predicate."""
         key = "no-tag" if msg_type is None else msg_type
         return key in self._active_filters
 
     def on_filter_chip_toggled(self, event: FilterChip.Toggled):
+        """A FilterChip was clicked: update the active filter set and
+        re-render the Logs tab to match."""
         if event.active:
             self._active_filters.add(event.msg_type)
         else:
@@ -365,6 +411,9 @@ class IR3DEApp(App):
         self._rerender_logs()
 
     def _rerender_logs(self):
+        """Redraw the Logs tab from the full _log_buffer under the current
+        filter set, since filtering can't be done incrementally on already
+        -written lines. Called whenever the filter set changes."""
         widget = self.query_one("#logs", FollowTailLog)
         widget.clear()
         for ts, node, mtype, line in iter_log_buffer():
@@ -372,10 +421,15 @@ class IR3DEApp(App):
                 widget.write(line)
 
     def _fill_input_divider(self):
+        """Redraw the horizontal rule above the input row to the current
+        terminal width. Called on mount and on every resize."""
         div = self.query_one("#input-divider", Static)
         div.update("═" * div.size.width)
 
     def on_submittable_text_area_submitted(self, event: SubmittableTextArea.Submitted):
+        """The user pressed Enter/[SEND]: hide the chat's placeholder text
+        and hand the message to input_handler (run.py's handle_input) on
+        its own background thread."""
         if self.peer is not None and self.peer.active_chat_id is not None:
             self._hide_chat_placeholder(self.peer.active_chat_id)
         user_text = event.value
@@ -388,13 +442,15 @@ class IR3DEApp(App):
             ).start()
 
     def _is_chat_awaiting_answer(self, chat_id: str | None) -> bool:
+        """Thin wrapper around Peer.is_awaiting_answer, safe to call with a
+        None chat_id or before the peer exists."""
         if self.peer is None or chat_id is None:
             return False
         return self.peer.is_awaiting_answer(chat_id)
 
     def start_waiting_for_answer(self, chat_id: str | None) -> None:
         """Disable the input and show an animated waiting message. Called via
-        app.call_from_thread from run_simulation.handle_input, so this
+        app.call_from_thread from run.py's handle_input, so this
         already runs on the main thread — do the widget updates directly
         rather than through disable_input(), which does its own
         call_from_thread and would raise (Textual forbids calling
@@ -416,6 +472,9 @@ class IR3DEApp(App):
             self._stop_waiting_for_answer()
 
     def _tick_waiting_msg(self) -> None:
+        """0.5s timer callback: advance the "..." animation, or stop it once
+        the pending answer has actually resolved (catches remote answers,
+        which land asynchronously on recv_loop's thread)."""
         if not self._is_chat_awaiting_answer(self._pending_answer_chat_id):
             self._stop_waiting_for_answer()
             return
@@ -440,6 +499,7 @@ class IR3DEApp(App):
         self.query_one("#prompt", Static).styles.color = "#444444"
 
     def _stop_waiting_for_answer(self) -> None:
+        """Clear the waiting state: stop the dots timer, re-enable input."""
         self._pending_answer_chat_id = None
         if self._waiting_timer is not None:
             self._waiting_timer.stop()
@@ -460,11 +520,14 @@ class IR3DEApp(App):
             placeholder.styles.display = "none"
 
     async def action_quit(self):
+        """Bound to Ctrl+C: stop the AXL node before exiting Textual."""
         if self.peer is not None:
             self.peer.stop_node()
         self.exit()
 
     def on_resize(self, event):
+        """Terminal was resized: redraw everything sized off the terminal
+        width (decorative bars, filter chips, chat tab bar's reserved width)."""
         self._fill_bars()
         self._fill_input_divider()
         drawer = self.query_one("#filter-drawer")
@@ -473,12 +536,15 @@ class IR3DEApp(App):
         self._resize_tabs_scroll_for_buttons()
     
     def _fill_bars(self):
+        """Redraw the top/bottom horizontal rules to the current terminal width."""
         bar = "═" * self.app.size.width
         for wid in ("#top-divider", "#top-bar", "#bottom-bar"):
             self.query_one(wid, Static).update(bar)
 
     def on_click(self, event):
-
+        """App-wide click router: the filter toggle, [SEND], the latency
+        metric picker, [+]/☰, and (via the ancestor scan below) a chat tab's
+        × close zone or double-click-to-rename."""
         if event.control is None:
             return
         if event.control.id == "filter-toggle":
@@ -518,6 +584,8 @@ class IR3DEApp(App):
                     return
 
     def _toggle_drawer(self):
+        """Show/hide the Logs tab's filter-chip drawer. Called from on_click
+        when "filters ▾/▴" is clicked."""
         drawer = self.query_one("#filter-drawer")
         toggle = self.query_one("#filter-toggle", Static)
         is_hidden = drawer.styles.display == "none"
@@ -527,6 +595,9 @@ class IR3DEApp(App):
             self.call_after_refresh(self._layout_filter_chips)
     
     def _layout_filter_chips(self):
+        """Rebuild the filter drawer's chips (all/none + one per message
+        type), wrapping them into rows that fit the current width. Called
+        when the drawer opens and on every resize while it's open."""
         drawer = self.query_one("#filter-drawer", Vertical)
         if drawer.styles.display == "none":
             return
@@ -579,6 +650,7 @@ class IR3DEApp(App):
                 h.mount(chip)
 
     def on_action_chip_triggered(self, event: ActionChip.Triggered):
+        """The "all"/"none" chip was clicked: bulk-set the active log filters."""
         if event.action == "all":
             self._active_filters = set(MSG_TYPE_COLORS.keys()) | {"no-tag"}
         elif event.action == "none":
@@ -609,6 +681,8 @@ class IR3DEApp(App):
                 chip.set_active(is_none)
     
     def _refresh_stats_tab(self):
+        """Refresh every Statistics-tab widget and the chat tab titles.
+        Called every 2s by the timer set in on_mount."""
         if self.peer is None:
             return
         self._refresh_models_table()
@@ -621,6 +695,8 @@ class IR3DEApp(App):
         self._refresh_chat_tab_title()
 
     def _refresh_models_table(self):
+        """Rebuild the Statistics tab's models table for whichever peer is
+        selected in the peers table (self or a remote), preserving sort/scroll."""
         if self.peer is None:
             return
 
@@ -721,6 +797,8 @@ class IR3DEApp(App):
         self.call_after_refresh(lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False))
 
     def _refresh_ir3de_stats_table(self):
+        """Rebuild the Statistics tab's IR3DE stats table for whichever peer
+        is selected in the peers table, preserving sort/scroll."""
         if self.peer is None:
             return
 
@@ -777,6 +855,8 @@ class IR3DEApp(App):
         self.call_after_refresh(lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False))
     
     def on_data_table_row_selected(self, event: DataTable.RowSelected):
+        """Clicking a peers-table row selects that peer, refreshing the
+        models/stats tables and plots to show its data instead of self's."""
         if event.control is None or event.control.id != "peers-table":
             return
         pk = event.row_key.value if event.row_key else None
@@ -798,6 +878,8 @@ class IR3DEApp(App):
         return pk
 
     def _selected_peer_name(self, pk: str) -> str:
+        """Display name for a public key: this peer's node_name for self,
+        else the remote peer_name/peer_id known_public_keys has for it."""
         assert self.peer is not None
         if pk == self.peer.public_key:
             return self.peer.node_name
@@ -805,7 +887,8 @@ class IR3DEApp(App):
         return info.get("peer_name") or f"Node {info.get('peer_id', '?')}"
 
     def _refresh_tag_bars(self):
-
+        """Redraw the "experts per tag" bar chart (Statistics tab) for
+        self, the selected peer, or (if "show all" is on) everyone combined."""
         if self.peer is None:
             return
 
@@ -826,11 +909,13 @@ class IR3DEApp(App):
         model_tag_lists: list[list[str]] = []
 
         def add_models_from_self():
+            """Collect this peer's own models' tag lists."""
             assert self.peer is not None
             for m in self.peer.models:
                 model_tag_lists.append(list(m.get("tags", []) or []))
 
         def add_models_from_remote(info: dict):
+            """Collect one remote peer's models' tag lists."""
             for mi in info.get("models_info", []):
                 model_tag_lists.append(list(mi.get("tags", []) or []))
 
@@ -882,6 +967,8 @@ class IR3DEApp(App):
         plot.refresh()
 
     def on_toggle_chip_toggled(self, event: ToggleChip.Toggled):
+        """Either "show all" chip was toggled: switch its plot between
+        self/selected-peer-only and every known peer combined."""
         if event.chip_id == "show-all-chip":
             self._show_all_experts = event.active
             self._refresh_tag_bars()
@@ -891,6 +978,8 @@ class IR3DEApp(App):
     
 
     def _refresh_tag_buttons(self):
+        """Rebuild the Control Panel's expertise tag buttons if the known
+        tag set changed, wrapping them into rows that fit the panel width."""
         if self.peer is None:
             return
 
@@ -935,7 +1024,8 @@ class IR3DEApp(App):
                 h.mount(btn)
     
     def on_tag_button_toggled(self, event: TagButton.Toggled):
-
+        """A Control Panel tag button was toggled: update the selected-tags
+        set (mirrored onto the peer) and refresh the expertise sections."""
         if event.active:
             self._selected_tags.add(event.tag)
         else:
@@ -947,6 +1037,9 @@ class IR3DEApp(App):
         self._refresh_expertise_sections()
 
     def _refresh_expertise_sections(self):
+        """Sync the Control Panel's ExpertiseSection cards to the current
+        selected tags: drop deactivated ones, mount/update the rest, and
+        pick a default model selection for any tag missing one."""
         if self.peer is None:
             return
 
@@ -998,6 +1091,8 @@ class IR3DEApp(App):
             self.peer.selected_models = dict(self._selected_models)
 
     def on_model_row_selected(self, event: ModelRow.Selected):
+        """A ModelRow was clicked: record it as the chosen model for its
+        tag and update every row in that tag's section to reflect it."""
         self._selected_models[event.tag] = (event.peer_pk, event.model_idx)
         self._selection_memory[event.tag] = (event.peer_pk, event.model_idx)   # ← remember
 
@@ -1037,6 +1132,7 @@ class IR3DEApp(App):
             return []
 
         def shorten(s: str, n: int) -> str:
+            """Truncate to n chars with a trailing "..." if too long."""
             return s if len(s) <= n else s[:n-3] + "..."
 
         candidates: list[tuple[str, int, str, str, int]] = []
@@ -1074,7 +1170,8 @@ class IR3DEApp(App):
         msg.update(self._loading_label + "." * self._loading_dots)
 
     def _hide_loading_msg(self) -> None:
-        # Chat tab loading line (existing)
+        """Hide the loading message/spinners once the peer is ready. Called
+        from ui_utils.enable_input, right before the input box is unlocked."""
         if self._loading_timer is not None:
             self._loading_timer.stop()
             self._loading_timer = None
@@ -1094,6 +1191,8 @@ class IR3DEApp(App):
             self.query_one(content_id).styles.display = "block"
 
     def _tick_control_spinner(self) -> None:
+        """Advance the diamond loading-spinner animation shared by the
+        Control Panel, Statistics, and (while active) chat panes."""
         self._control_spinner_frame = (self._control_spinner_frame + 1) % len(DIAMOND_ROTATION)
         frame = DIAMOND_FRAMES[DIAMOND_ROTATION[self._control_spinner_frame]]
         spinners = ["#control-spinner", "#stats-spinner"]
@@ -1103,6 +1202,9 @@ class IR3DEApp(App):
             self.query_one(spinner_id, Static).update(frame)
 
     def _refresh_latency_plot(self):
+        """Redraw the "latency vs parameters" scatter plot (Statistics tab)
+        for the currently-selected metric (prompt/total/input) and scope
+        (self, selected peer, or all if "show all" is on)."""
         if self.peer is None:
             return
 
@@ -1136,6 +1238,7 @@ class IR3DEApp(App):
         points: list[tuple[int, float, str]] = []
 
         def add_local():
+            """Add one (size, latency, label) point per local model with data."""
             assert self.peer is not None
             for i, mi in enumerate(self.peer.models_info):
                 size = mi.get("size", 0) or 0
@@ -1147,6 +1250,8 @@ class IR3DEApp(App):
                 points.append((size, statistics.mean(vals) * scale, label))
 
         def add_remote(info):
+            """Add one (size, latency, label) point per one remote peer's
+            models with data."""
             models_info_list = info.get("models_info") or []
             model_lats = info.get("model_latencies", {}) or {}
             for i, mi in enumerate(models_info_list):
@@ -1205,6 +1310,8 @@ class IR3DEApp(App):
         plot.refresh()
     
     def _on_latency_metric_chosen(self, value: str | None) -> None:
+        """LatencyMetricSelectScreen callback: switch the latency plot's
+        metric and relabel its button, or do nothing if canceled."""
         if value is None:
             return
         self._latency_metric = value
@@ -1220,6 +1327,9 @@ class IR3DEApp(App):
         self._refresh_latency_plot()
     
     def _refresh_chat_tab_title(self) -> None:
+        """Sync every open chat tab's label to its chat's current title
+        (set once a model generates one, or via manual rename). Called
+        every 2s by _refresh_stats_tab."""
         if self.peer is None:
             return
         tabbed = self.query_one("#right-tabs", TabbedContent)
@@ -1234,6 +1344,8 @@ class IR3DEApp(App):
                 continue
 
     def _open_chat_rename_dialog(self) -> None:
+        """Open the rename modal for the active chat. Called from on_click
+        on a double-click on a chat tab."""
         if self.peer is None:
             return
         chat = self.peer.current_chat
@@ -1243,6 +1355,8 @@ class IR3DEApp(App):
         self.push_screen(ChatTitleRenameScreen(current), self._on_chat_renamed)
 
     def _on_chat_renamed(self, new_title) -> None:
+        """ChatTitleRenameScreen callback: apply the new title (or clear it
+        back to auto-generated if left blank), or do nothing if canceled."""
         if new_title is None or self.peer is None:
             return
         chat = self.peer.current_chat
@@ -1257,6 +1371,9 @@ class IR3DEApp(App):
         log(f"Chat renamed to: '{new_title or '(default)'}'", node_id=self.peer.peer_id, msg_type="text")
     
     async def _populate_chat_tabs(self) -> None:
+        """Mount tabs for every previously-open chat plus a fresh empty one,
+        then the [+]/☰ button pair. Called once from run.py's run_peer
+        after Peer() has loaded the peer's chats."""
         if self.peer is None:
             return
 
@@ -1308,6 +1425,10 @@ class IR3DEApp(App):
         self.call_after_refresh(self._resize_tabs_then_scroll_to_end)
 
     def _resize_tabs_then_scroll_to_end(self) -> None:
+        """Resize the tab bar's scroll viewport, then (once that resize has
+        gone through a layout pass) scroll it fully into view. Called after
+        mounting/creating/reopening a chat tab, so the active tab is never
+        left hidden under the [+]/☰ buttons."""
         self._resize_tabs_scroll_for_buttons()
         # The fresh empty chat (mounted rightmost, earlier in
         # _populate_chat_tabs) was made active before the tab row had its
@@ -1319,6 +1440,7 @@ class IR3DEApp(App):
         self.call_after_refresh(self._scroll_chat_tabs_to_end)
 
     def _scroll_chat_tabs_to_end(self) -> None:
+        """Force the chat tab bar's horizontal scroll all the way right."""
         try:
             tabs_scroll = self.query_one("#right-tabs Tabs #tabs-scroll")
         except Exception:
@@ -1391,7 +1513,7 @@ class IR3DEApp(App):
 
     def _show_loading_models(self) -> None:
         """Swap the animated loading message to 'Loading local models' once
-        the AXL backend has finished initialising."""
+        the AXL backend has finished initializing."""
         self._loading_label = "Loading local models"
         msg = self.query_one("#loading-msg", Static)
         msg.update(self._loading_label + "." * self._loading_dots)
@@ -1447,6 +1569,10 @@ class IR3DEApp(App):
         self.call_after_refresh(self._resize_tabs_then_scroll_to_end)
 
     def _close_chat_tab(self, chat_id: str) -> None:
+        """Close a chat's tab (marking it closed but keeping it in
+        peer.chats so it can be reopened), activating a neighboring tab or
+        spawning a fresh empty chat if it was the last one open. Called
+        from on_click's × zone handling."""
         if self.peer is None or chat_id not in self.peer.chats:
             return
 
@@ -1468,7 +1594,7 @@ class IR3DEApp(App):
 
         is_only_open = len(open_chat_ids) == 1
 
-        # Case B: sole, active, empty chat — closing would just recreate it.
+        # Sole, active, empty chat — closing it would just recreate it.
         if is_empty and is_only_open and was_active:
             return
 
@@ -1497,13 +1623,15 @@ class IR3DEApp(App):
             self._create_new_chat()
     
     def _make_tab_label(self, title: str) -> str:
-        """Tab label as a markup string. The trailing '×' is forced to grey via
-        inline colour markup, so it stays grey even when Tab.-active repaints
+        """Tab label as a markup string. The trailing '×' is forced to gray via
+        inline color markup, so it stays gray even when Tab.-active repaints
         the rest of the label blue. Bold weight in :hover / .-active states is
         inherited automatically."""
         return f"{_md_escape(title)}  [#888888]×[/]"
 
     def _open_chat_menu(self) -> None:
+        """Open the ☰ menu listing every non-empty chat, most recent first.
+        Called from on_click on the chat-menu-button."""
         if self.peer is None:
             return
 
@@ -1524,7 +1652,7 @@ class IR3DEApp(App):
         self.push_screen(ChatMenuScreen(entries), self._on_chat_menu_result)
 
     def _on_chat_menu_result(self, result) -> None:
-        """result: None (cancelled) | (chat_id, 'open') | (chat_id, 'delete')."""
+        """result: None (canceled) | (chat_id, 'open') | (chat_id, 'delete')."""
         if result is None or self.peer is None:
             return
         chat_id, action = result
@@ -1538,6 +1666,7 @@ class IR3DEApp(App):
             if not already_open:
                 self._mount_chat_tab(chat_id, self.peer.chats[chat_id])
             def _activate() -> None:
+                """Switch to the just-(re)opened tab once it's mounted."""
                 tabbed.active = pane_id
             self.call_after_refresh(_activate)
             self.peer.active_chat_id = chat_id
@@ -1548,6 +1677,7 @@ class IR3DEApp(App):
                 return
             title = chat.get("title") or "Chat"
             def _on_confirm(confirmed: bool | None) -> None:
+                """DeleteChatConfirmScreen callback: delete only if confirmed."""
                 if confirmed:
                     self._delete_chat(chat_id)
             self.push_screen(DeleteChatConfirmScreen(title), _on_confirm)
@@ -1557,7 +1687,7 @@ class IR3DEApp(App):
         """Permanently delete a chat: remove its tab if open, drop from
         peer.chats, unlink its disk file. If it was the currently-active
         tab, activate the left neighbor; if it was the last tab, spawn a
-        fresh empty (matches _close_chat_tab's post-close behaviour)."""
+        fresh empty (matches _close_chat_tab's post-close behavior)."""
         if self.peer is None or chat_id not in self.peer.chats:
             return
 
@@ -1598,6 +1728,8 @@ class IR3DEApp(App):
                 self._create_new_chat()
 
     def _format_relative_time(self, iso_ts: str) -> str:
+        """Render an ISO timestamp as "just now"/"5m ago"/etc. for the ☰
+        chat menu's per-row timestamps."""
         if not iso_ts:
             return ""
         try:

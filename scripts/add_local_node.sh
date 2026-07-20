@@ -1,4 +1,24 @@
 #!/usr/bin/env bash
+#
+# Utility for simulating custom node topologies. Creates a new simulated
+# local node: picks the first free node id (00-99), generates its ed25519
+# private key, randomly wires it up to some existing local nodes as peers,
+# and writes its local_nodes/configNN.json and metadataNN.json. There's no
+# need to run this to try the app (pre-built example node setups are
+# provided separately) — use it if you want to simulate a different graph
+# of nodes than what's provided.
+#
+# The generated metadataNN.json is almost empty (just node_id/node_name) —
+# edit it by hand afterward to add "models" and/or "stats" entries (see
+# Peer.get_models_info/get_stats_info for the expected shape) if you want
+# this node to actually serve experts or IR3DE stats.
+#
+# Usage:
+#   ./scripts/add_local_node.sh [NUM_PEERS] [NODE_NAME]
+#
+# NUM_PEERS (default 1) is how many existing local nodes to connect the new
+# one to (capped at however many already exist). NODE_NAME (default
+# "Node NN") is a display-only name stored in its metadata.
 
 num_peers="${1:-1}"
 
@@ -118,13 +138,11 @@ echo "Created ${new_file}."
 # CREATING METADATA FILE
 echo "Creating metadata file for node ${missing_nn}..."
 metadata_file="${nodes_dir}/metadata${missing_nn}.json"
-public_key=$(openssl pkey -in "${nodes_dir}/pk${missing_nn}.pem" -pubout -outform DER | tail -c 32 | xxd -p -c 64)
- 
+
 cat > "${metadata_file}" << EOF
 {
   "node_id": "${missing_nn}",
-  "node_name": "${node_name}",
-  "public_key": "${public_key}"
+  "node_name": "${node_name}"
 }
 EOF
 echo "Created ${metadata_file}."

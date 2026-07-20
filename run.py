@@ -1,11 +1,52 @@
-import os, sys, signal, traceback, argparse, threading, time
+"""Entry point: launches one IR3DE-AXL peer — an AXL P2P node plus the
+Textual TUI (or, headless, just the node) that lets it chat, gossip with
+other peers, and route messages to experts via IR3DE. Meant for running
+local simulations of the P2P network (per peer, in its own terminal), not
+a production deployment tool.
+
+Usage:
+    python run.py [options]
+
+--peer-id is optional and only needed when simulating several peers on the
+same machine at once (see scripts/add_local_node.sh, which creates each
+simulated node's config/metadata/key under local_nodes/): omit it to run
+the single default local peer (local_nodes/metadata.json), or pass the
+node's number to run that one instead (local_nodes/metadataNN.json).
+
+Key options (see utils.get_args() for the full list and defaults):
+    --peer-id N           Which simulated local node to run (omit for the
+                          default local peer)
+    --tok-type {mistral,llama}
+                          Which tokenizer/embedder identity this peer is
+                          active for — determines which IR3DE stats and
+                          which default model it uses
+    --answer-timeout SECONDS
+                          How long to wait for an expert's answer before
+                          giving up
+    --num-characters-conversation-history N
+                          Prompt character budget before older turns get
+                          summarized (0 disables summarization)
+
+Example:
+    python run.py --peer-id 01 --tok-type mistral
+"""
+import os
+import sys
+import threading
+import time
+import traceback
 from multiprocessing import resource_tracker
 
-from peer import Peer
-from utils import log, ACTIVATE_UI
+# This file lives at the repo root, but every module it and its dependents
+# import (peer, utils, ui.*, ...) uses bare imports assuming src/ is on
+# sys.path, matching how they import each other internally.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
+from peer import Peer
 from ui.ui import IR3DEApp
-from ui.ui_utils import disable_input, enable_input, disable_filters, enable_filters
+from ui.ui_utils import disable_filters, disable_input, enable_filters, enable_input
+from utils import (ACTIVATE_UI, _install_node_signal_cleanup, _install_tui_node_cleanup,
+                    get_args, handle_input, log)
 
 
 os.environ.setdefault("COLORTERM", "truecolor")
@@ -19,78 +60,6 @@ os.environ.setdefault("COLORTERM", "truecolor")
 # it entirely — verified by direct reproduction.
 resource_tracker.ensure_running()
 
- 
-def get_args():
-    parser = argparse.ArgumentParser(description="Test one peer locally")
-    parser.add_argument("--peer-id", type=int, required=False, default=None)
-    parser.add_argument("--discover-peers-interval", type=int, default=60)
-    parser.add_argument("--check-acks-interval", type=int, default=100)
-    parser.add_argument("--greeting-timeout", type=int, default=60)
-    parser.add_argument("--knowledge-timeout", type=int, default=60)
-    parser.add_argument("--ack-timeout", type=int, default=60)
-    parser.add_argument("--share-knowledge-interval", type=int, default=30)
-    parser.add_argument("--num-peers-to-greet", type=int, default=5)
-    parser.add_argument("--num-peers-to-share", type=int, default=5)
-    parser.add_argument("--share-info-interval", type=int, default=60)
-    parser.add_argument("--share-stats-interval", type=int, default=60)
-    parser.add_argument("--stats-timeout", type=int, default=120)
-    parser.add_argument("--ir3de-lambda", type=float, default=0.01)
-    parser.add_argument("--ir3de-entropy-top-k", type=int, default=10)
-    parser.add_argument("--max-answer-length", type=int, default=256)
-    parser.add_argument("--answer-timeout", type=int, default=300,
-                        help="Seconds to wait for an expert's answer (local generation or a "
-                             "remote peer's reply) before giving up.")
-    parser.add_argument( "--num-characters-conversation-history", type=int, default=1000, 
-                        help="Maximum character budget for the prompt sent to experts (system "
-                             "prompt + summary + history). When exceeded, oldest user/agent pairs "
-                             "are summarised. Set to 0 to disable.")
-    parser.add_argument('--tok-type', type=str, default='mistral', choices=['llama', 'mistral'], help='Type of tokenizer to use')
-    return parser.parse_args()
- 
- 
-def _install_node_signal_cleanup(peer):
-    """Headless (main thread): stop the AXL node on SIGTERM/SIGHUP so an
-    externally-killed peer process doesn't leave an orphaned node. The TUI has its
-    own variant (_install_tui_node_cleanup); Ctrl+C is handled separately (headless:
-    KeyboardInterrupt -> run_peer; TUI: action_quit).
-    """
-    def _handler(signum, frame):
-        peer.stop_node()
-        sys.stdout.flush()
-        os._exit(128 + signum)
-
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        try:
-            signal.signal(sig, _handler)
-        except (ValueError, OSError, AttributeError):
-            # Not the main thread, or signal unavailable on this platform.
-            pass
-
-
-def _install_tui_node_cleanup(app):
-    """TUI (main thread): stop the AXL node on SIGTERM/SIGHUP — the catchable exits
-    Textual's Ctrl+C handling doesn't cover. Closing the terminal window or an SSH
-    drop delivers SIGHUP; an external kill/pkill/IDE-stop delivers SIGTERM. Installed
-    before app.run(). Stops the node directly, then asks Textual to exit so the terminal
-    is restored; falls back to SystemExit if app.exit() can't run. The window before
-    app.peer is set is covered by the Peer's atexit (registered when the node spawns).
-    """
-    def _handler(signum, frame):
-        peer = getattr(app, "peer", None)
-        if peer is not None:
-            peer.stop_node()
-        try:
-            app.exit()
-        except Exception:
-            raise SystemExit(128 + signum)
-
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        try:
-            signal.signal(sig, _handler)
-        except (ValueError, OSError, AttributeError):
-            # Not the main thread, or signal unavailable on this platform.
-            pass
-
 
 def run_peer(app, args):
     """All peer logic runs in this background thread."""
@@ -100,8 +69,10 @@ def run_peer(app, args):
         if app is not None:
             disable_input(app)
             disable_filters(app)
-        
+
         def _on_axl_ready():
+            """Peer's on_axl_ready callback: swap the loading message once
+            the AXL node subprocess is up, before models start loading."""
             if app is not None:
                 app.call_from_thread(app._show_loading_models)
 
@@ -123,13 +94,13 @@ def run_peer(app, args):
             enable_input(app, peer.peer_id)
         else:
             _install_node_signal_cleanup(peer)
-    
+
         # Log the peer info now that the widget is available
         log(f"Peer {peer.peer_id} - Public Key: {peer.public_key[:8]}..., IPv6: {peer.ipv6_address}", peer.peer_id)
-    
+
         t = threading.Thread(target=peer.recv_loop, daemon=True, name=str(peer.peer_id))
         t.start()
-    
+
         peer.send_greetings(num_peers_to_greet=args.num_peers_to_greet, timeout=args.greeting_timeout)
         last_greetings = time.time()
         last_check_acks = time.time()
@@ -138,21 +109,21 @@ def run_peer(app, args):
         last_shared_stats = time.time() + 60 # 2 * args.share_knowledge_interval
         never_shared_info = True
         never_shared_stats = True
-    
+
         while True:
-            
+
             current_time = time.time()
             if current_time - last_greetings >= args.discover_peers_interval:
                 peer.send_greetings(num_peers_to_greet=args.num_peers_to_greet, timeout=args.greeting_timeout)
                 last_greetings = current_time
                 time.sleep(1)
-            
+
             current_time = time.time()
             if current_time - last_check_acks >= args.check_acks_interval:
                 peer.check_acks(timeout=args.ack_timeout)
                 last_check_acks = current_time
                 time.sleep(1)
-    
+
             current_time = time.time()
             if current_time - last_shared_knowledge >= args.share_knowledge_interval:
                 peer.share_knowledge(num_peers_to_share=args.num_peers_to_share, timeout=args.knowledge_timeout)
@@ -174,7 +145,7 @@ def run_peer(app, args):
                 last_shared_stats = current_time
                 never_shared_stats = False
                 time.sleep(1)
-    
+
             time.sleep(0.1)
 
     except BaseException:
@@ -185,7 +156,7 @@ def run_peer(app, args):
         else:
             peer_id = "unknown"
         path = f"logs/error_{peer_id}_{int(time.time())}.log"
-        
+
         with open(path, "a") as f:
             traceback.print_exc(file=f)
 
@@ -202,18 +173,10 @@ def run_peer(app, args):
                 pass
 
 
-def handle_input(app, args, user_input):
-    chat_id = getattr(app.peer, "active_chat_id", None)
-    log(f"{user_input}", node_id="USER", msg_type=None, right=True, chat_id=chat_id)
-    app.call_from_thread(app.start_waiting_for_answer, chat_id)
-    try:
-        app.peer.handle_user_input(user_input, timeout=args.answer_timeout)
-    finally:
-        app.call_from_thread(app.maybe_stop_waiting_for_answer, chat_id)
-
-
 def main():
-
+    """Entry point: launch the Textual TUI (or, if ACTIVATE_UI is False, run
+    the peer headless in this thread) and route crashes/Ctrl+C to a clean
+    node shutdown instead of leaving the AXL subprocess orphaned."""
     args = get_args()
 
     if ACTIVATE_UI:
@@ -240,11 +203,11 @@ def main():
                 log(f"Stopping peer node (PID: {app.peer.proc.pid})", node_id=app.peer.peer_id)
                 app.peer.stop_node()
             raise
-    
+
     else:
         run_peer(None, args)
 
- 
+
 if __name__ == "__main__":
     try:
         main()

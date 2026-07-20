@@ -50,14 +50,17 @@ CHATS_DIR = Path("chats")
 # ───────────────────────── helpers ─────────────────────────
 
 def _now_iso() -> str:
+    """Current UTC time as an ISO 8601 string, for created_at/updated_at/ts fields."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _new_chat_id() -> str:
+    """Time-prefixed unique id for a new chat (sortable by creation order)."""
     return f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
 
 
 def chat_path(chat_id: str) -> Path:
+    """On-disk JSON path for a given chat_id, under CHATS_DIR."""
     return CHATS_DIR / f"{chat_id}.json"
 
 
@@ -133,22 +136,26 @@ def mark_last_user_failed(chat: dict) -> None:
 
 
 def set_title(chat: dict, title: str | None) -> None:
+    """Set (or clear) the chat's title. Called from peer.py after a title is
+    generated, and from the UI's rename dialog (IR3DEApp._on_chat_renamed)."""
     chat["title"] = title
     chat["updated_at"] = _now_iso()
 
 
 def set_summary(chat: dict, summary: str | None) -> None:
+    """Replace the chat's rolling summary, set by peer.py's _handle_summary
+    once older turns are summarized past the character budget."""
     chat["summary"] = summary
     chat["updated_at"] = _now_iso()
 
 
 def trim_oldest_pair(chat: dict) -> tuple[dict, dict] | None:
-    """Advance the summarisation boundary past the next (user, agent) couple
+    """Advance the summarization boundary past the next (user, agent) couple
     in the live history. Returns the pair (still present in chat['messages'])
-    so the caller can feed it into the summariser, or None if there isn't a
+    so the caller can feed it into the summarizer, or None if there isn't a
     complete couple at the head of the live slice yet.
 
-    Unlike the old behaviour, this does NOT mutate chat['messages']. The
+    Unlike the old behavior, this does NOT mutate chat['messages']. The
     couple stays in the persisted transcript so the UI can keep rendering
     the full history; only the LLM-facing view (see history_for_expert)
     shrinks."""
@@ -196,11 +203,14 @@ def save_chat(chat: dict) -> None:
 
 
 def load_chat(chat_id: str) -> dict:
+    """Read one chat's full record from disk. Raises if it doesn't exist."""
     with open(chat_path(chat_id), "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def delete_chat(chat_id: str) -> bool:
+    """Unlink a chat's file, if present. Returns whether it existed. Called
+    by Peer.delete_chat and IR3DEApp._close_chat_tab/_delete_chat."""
     path = chat_path(chat_id)
     if path.exists():
         path.unlink()

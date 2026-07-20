@@ -1,4 +1,34 @@
-import os, argparse
+"""Computes the IR3DE ridge-regression stats (A, b matrices) for one
+dataset/domain, embedding its examples with a router model's own embedding
+table and saving the result for peer.py to load and gossip at runtime.
+
+You don't need to run this: stats for every dataset/tokenizer pair it
+currently supports are already computed and published on Hugging Face
+(Erosinho/IR3DE-stats, see utils.IR3DE_STATS_REPO_ID) and get downloaded
+automatically by peer.py. It's kept here as a worked example of how those
+stats were produced — to extract stats for a new dataset, a different
+tokenizer, or a different embedding layer, you'll need to adapt this file
+(and TAGS_MAP/CLM_DATASETS/m2d2_utils.py) by hand first.
+
+Usage:
+    python src/extract_ir3de_stats.py --dataset DATASET [--tok-type {mistral,llama}] [options]
+
+DATASET is one of TAGS_MAP's keys:
+  - CLM datasets (cs_l1, math_l1, physics_l1, History_and_events,
+    Philosophy_and_thinking): read from local Parquet files under
+    datasets/<dataset>/{train,validation,test}/*.parquet (see m2d2_utils.py).
+  - Reasoning datasets (gsm8k, m_arc, humaneval, ifeval): downloaded
+    automatically via lm-eval-harness.
+
+Output is written to ir3de_stats/<model>_<dataset>.pth (CLM datasets get a
+"m2d2_" infix), matching the naming ir3de_stats/default_stats.json and
+Peer.get_stats_info expect.
+
+Example:
+    python src/extract_ir3de_stats.py --dataset m_arc --tok-type mistral
+"""
+import argparse
+import os
 from copy import deepcopy
 
 import torch
@@ -37,6 +67,8 @@ os.environ["HF_ALLOW_CODE_EVAL"] = "1"
 
 
 def get_args():
+    """Parse CLI args for this standalone extraction script (not part of the
+    live P2P app — run manually to (re)generate one dataset's stats .pth file)."""
     parser = argparse.ArgumentParser(description="Extract IR3DE statistics")
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument("--dataset", type=str, choices=list(TAGS_MAP.keys()), default='ifeval', help="Domain to extract stats for")  # TODO: required=True
@@ -50,7 +82,9 @@ def get_args():
 
 
 def main():
-
+    """Embed one dataset's examples with the router's embedding table, fit
+    the ridge-regression (A, b) stats over them, and save the result to
+    ir3de_stats/<model>_<dataset>.pth for peer.py to load at runtime."""
     set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model_name = "mistralai/Mistral-7B-v0.1" if args.tok_type == 'mistral' else "meta-llama/Meta-Llama-3-8B"
@@ -119,8 +153,5 @@ def main():
 
 if __name__ == "__main__":
     args = get_args()
-    tag = args.dataset
-    # for tag in TAGS_MAP:
-    print(f"Extracting IR3DE statistics for dataset {tag}...")
-    # args.dataset = tag
+    print(f"Extracting IR3DE statistics for dataset {args.dataset}...")
     main()

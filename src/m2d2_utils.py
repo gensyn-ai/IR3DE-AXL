@@ -1,27 +1,33 @@
-import os
 import glob
+import os
 import random
 
 import torch
 import torch.distributed as dist
-from torch.utils.data import get_worker_info, DataLoader
 from datasets.io.parquet import ParquetDatasetReader
 from lm_eval.tasks import get_task_dict
+from torch.utils.data import DataLoader, get_worker_info
 
 
 class ShardedDataset(torch.utils.data.IterableDataset):
+    """Streams a Parquet glob, splitting it across DataLoader workers and
+    distributed ranks so each sample is read by exactly one of them. Used
+    by get_raw_clm_datasets for the CLM (M2D2) datasets."""
 
     def __init__(self, path: str):
+        """`path` is a glob pattern, e.g. '.../train/*.parquet'."""
         self.path = path
         # Defer reader creation to __iter__ to avoid forking issues with workers
         self._reader = None
 
     def _ensure_reader(self):
+        """Lazily create the underlying streaming Parquet reader."""
         if self._reader is None:
             self._reader = ParquetDatasetReader(self.path, streaming=True).read()
         return self._reader
 
     def __iter__(self):
+        """Yield this shard's samples as int64 CPU tensors."""
         reader = self._ensure_reader()
 
         # Discover distributed rank/world size if initialized
@@ -53,21 +59,24 @@ class ShardedDataset(torch.utils.data.IterableDataset):
                 for key, value in sample.items()
             }
 
-    # def __len__(self):
-    #     return len(self.data_reader)
-
 
 class IRDataset(torch.utils.data.Dataset):
+    """Tokenizes one reasoning-benchmark's prompts on the fly for IR3DE stats
+    extraction. Built by get_reasoning_dataloaders, one instance per split."""
+
     def __init__(self, dataset, tokenizer, max_length=1025, dataset_name='gsm8k'):
+        """`dataset` is the raw (already sampled/merged) list of examples."""
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.dataset_name = dataset_name
 
     def __len__(self):
+        """Number of examples in the underlying (already sampled) dataset."""
         return len(self.dataset)
 
     def get_prompt(self, idx):
+        """Extract example idx's prompt text; the field name varies by dataset."""
         if self.dataset_name == 'gsm8k':
             prompt = f"{self.dataset[idx]['question']}"
         elif self.dataset_name == 'm_arc':
@@ -79,6 +88,7 @@ class IRDataset(torch.utils.data.Dataset):
         return prompt
 
     def __getitem__(self, idx):
+        """Tokenize example idx into next-token-prediction input/label/mask tensors."""
         prompt = self.get_prompt(idx)
         out = self.tokenizer(prompt, max_length=self.max_length, padding='max_length', truncation=True)
         return {
@@ -89,6 +99,9 @@ class IRDataset(torch.utils.data.Dataset):
     
 
 def get_raw_clm_datasets(dataset_name: str):
+    """Build train/validation/test ShardedDatasets for one of the M2D2 CLM
+    domains (math_l1, cs_l1, ...) from Parquet files under datasets/. Called
+    by get_clm_dataloaders, which extract_ir3de_stats.py uses for CLM_DATASETS."""
     if dataset_name == 'openwebtext':
         path = 'datasets/openwebtext/raw'
 
@@ -128,7 +141,8 @@ def get_raw_clm_datasets(dataset_name: str):
 
 
 def get_clm_dataloaders(dataset_name: str, batch_size: int, num_workers: int, drop_last_test: bool = False):
-
+    """Wrap get_raw_clm_datasets' splits in DataLoaders. Entry point used by
+    extract_ir3de_stats.py for CLM_DATASETS (math_l1, cs_l1, physics_l1, ...)."""
     datasets = get_raw_clm_datasets(dataset_name)
 
     dataloaders = {
@@ -141,6 +155,9 @@ def get_clm_dataloaders(dataset_name: str, batch_size: int, num_workers: int, dr
 
 
 def get_m_arc_merged_dataset(max_num_samples, task, split):
+    """Round-robin up to max_num_samples examples across all m_arc language
+    subtasks, advancing each language's own read offset every pass so no
+    sample is taken twice. Called by get_reasoning_dataloaders for m_arc."""
     remaining_samples = max_num_samples
     dataset = []
     offsets = {name: 0 for name in task.keys()}  # type: ignore
@@ -163,7 +180,8 @@ def get_m_arc_merged_dataset(max_num_samples, task, split):
 
 
 def get_reasoning_task(task_name):
-
+    """Load an lm-eval-harness task (or, for m_arc, all 30 language
+    subtasks merged into one dict) and apply its few-shot config."""
     NUM_SHOTS = {
         'gsm8k': 8,
         'mathqa': 0,
@@ -199,7 +217,9 @@ def get_reasoning_task(task_name):
 
 
 def get_reasoning_dataloaders(task_name, max_num_samples, tokenizer, batch_size, num_workers):
-
+    """Build train/test DataLoaders for a reasoning benchmark (gsm8k,
+    m_arc, humaneval, ifeval), resampling to exactly max_num_samples.
+    Entry point used by extract_ir3de_stats.py for non-CLM datasets."""
     with torch.no_grad():
 
         task_dict, _ = get_reasoning_task(task_name)
