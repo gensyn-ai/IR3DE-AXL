@@ -20,8 +20,6 @@ import os
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from ir3de_stats.models.llama_experts import get_llama_expert
-
 _MODELS: dict[int, dict] = {}
 
 
@@ -47,21 +45,8 @@ def load_model(model_idx: int, model_info: dict) -> dict:
     it resident in _MODELS. Returns lightweight metadata only (size/type) —
     the model itself never leaves this process."""
     device = _device()
-
-    if "path" in model_info:
-        model, _, _ = get_llama_expert(1.15e8)
-        if not os.path.isfile(model_info["path"]):
-            raise FileNotFoundError(f"Checkpoint path not found: {model_info['path']}")
-        state = torch.load(model_info["path"], map_location='cpu')
-        model.load_state_dict(state, strict=False)
-        model.to(device)
-    elif "hf_name" in model_info:
-        model = AutoModelForCausalLM.from_pretrained(model_info["hf_name"])
-        model.to(device)  # type: ignore
-    else:
-        raise ValueError(
-            f"Model info must contain either 'path' or 'hf_name'. Provided info: {model_info}."
-        )
+    model = AutoModelForCausalLM.from_pretrained(model_info["hf_name"])
+    model.to(device)  # type: ignore
 
     tokenizer = AutoTokenizer.from_pretrained(model_info["tokenizer"])
     _MODELS[model_idx] = {"model": model, "tokenizer": tokenizer}

@@ -4,7 +4,7 @@ from copy import deepcopy
 import torch
 from transformers import AutoModel, AutoTokenizer, set_seed
 
-from ir3de_stats.m2d2_utils import get_clm_dataloaders, get_reasoning_dataloaders
+from m2d2_utils import get_clm_dataloaders, get_reasoning_dataloaders
 
 
 TAGS_MAP = {

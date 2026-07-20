@@ -211,13 +211,11 @@ class Peer:
     def get_models_info(self):
         models = []
         for i, model_info in enumerate(self.models_info):
-            display_name = model_info.get("hf_name") or model_info.get("path", "unknown")
+            display_name = model_info.get("hf_name", "unknown")
             log(f"Loading expert model from {display_name}", self.peer_id, msg_type=None)
 
             try:
                 meta = self.model_executor.submit(model_worker.load_model, i, model_info).result()
-            except FileNotFoundError:
-                raise
             except ValueError as e:
                 raise ValueError(f"{e} Check the {self.metadata_path} file.") from e
 
@@ -889,7 +887,7 @@ class Peer:
                     "tokenizer_name": model_info.get("tokenizer"),
                     "size": model_info.get("size"),
                     "type": model_info.get("type"),
-                    "name": model_info.get("hf_name") or os.path.basename(model_info.get("path", "unknown")),
+                    "name": model_info.get("hf_name", "unknown"),
                 })
             for stats in self.stats_info:
                 info_msg["stats_info"].append({

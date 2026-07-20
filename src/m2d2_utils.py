@@ -106,7 +106,7 @@ def get_raw_clm_datasets(dataset_name: str):
     else:
         raise NotImplementedError(f"Dataset {dataset_name} not supported.")
 
-    # Resolve dataset directory relative to workspace root (parent of DetGatingMoE-exp)
+    # Resolve dataset directory relative to the repo root (parent of src/)
     workspace_root = os.path.dirname(os.path.dirname(__file__))
     dataset_dir = os.path.join(workspace_root, path)
 
