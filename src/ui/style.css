@@ -542,6 +542,16 @@ ChatTitleRenameScreen {
     layers: base overlay;
 }
 
+/* Textual's own Tabs default is `#tabs-scroll { overflow: hidden; }`, which
+   blocks not just the scrollbar but scrolling itself (mouse wheel, etc.) —
+   tabs beyond the visible width become genuinely unreachable once there are
+   enough open chats. Switch to `auto` so it's scrollable, but keep the
+   scrollbar itself invisible. */
+#right-tabs Tabs > #tabs-scroll {
+    overflow-x: auto;
+    scrollbar-size-horizontal: 0;
+}
+
 #right-tabs Tab:hover {
     text-style: bold;
 }

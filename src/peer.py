@@ -330,10 +330,31 @@ class Peer:
         self.last_seen[sender] = time.time()  # start the liveness clock at discovery
 
     def recv_loop(self, timeout=120):
-        
+
+        node_unreachable = False
+
         while True:
-            
-            resp = self.session.get(f"{AXL}{self._axl_suffix}/recv")
+
+            try:
+                resp = self.session.get(f"{AXL}{self._axl_suffix}/recv")
+            except requests.exceptions.RequestException as e:
+                # The AXL node subprocess died, was killed, or is mid-restart.
+                # Left unguarded, this exception kills the whole recv_loop
+                # thread permanently — the peer would silently stop receiving
+                # anything for the rest of the run. Keep retrying instead, so
+                # it self-heals if the node comes back; log the transition
+                # once rather than once per attempt to avoid flooding the log
+                # tab while it's down.
+                if not node_unreachable:
+                    log(f"Lost connection to the AXL node ({e}). Will keep retrying in the background.",
+                        self.peer_id, msg_type="warning")
+                    node_unreachable = True
+                time.sleep(2)
+                continue
+
+            if node_unreachable:
+                log("Connection to the AXL node restored.", self.peer_id, msg_type=None)
+                node_unreachable = False
 
             if resp.status_code == 200 and len(resp.content) > 0 and not resp.content.startswith(b"{"):
                 

@@ -1,9 +1,11 @@
 import os, random, threading, statistics
 from datetime import datetime, timezone
 
+from textual import events
 from textual.app import App, ComposeResult
 from textual.widgets import RichLog, Static, TextArea, TabbedContent, TabPane, DataTable
 from textual.widgets._tabs import Tab
+from textual.widgets._tabbed_content import ContentTabs
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual_plotext import PlotextPlot
 from rich.text import Text as RichText
@@ -141,9 +143,48 @@ class IR3DEApp(App):
 
         yield Static("", id="bottom-bar")
 
+    def _enable_horizontal_tab_scroll(self) -> None:
+        """Plain mouse-wheel scroll (and a vertical two-finger trackpad swipe)
+        always targets vertical scroll by default, rerouting to horizontal
+        only with Shift/Ctrl held. The chat tab bar has no vertical content
+        at all, so its default handler never consumes the event (nothing to
+        scroll) and it just bubbles up doing nothing.
+
+        Textual dispatches `_on_<event>` handlers by looking them up on the
+        *class* (`cls.__dict__`), walking the MRO — an instance-level
+        attribute override is invisible to it. So this patches the
+        `ContentTabs` class (the concrete type TabbedContent always uses
+        internally) once, scoped at call time to only the chat tab bar via
+        `tabs.tabbed_content.id` — any other TabbedContent (e.g. the left
+        Control Panel/Statistics/Logs tabs) keeps Textual's normal vertical
+        wheel behavior. Horizontal trackpad swipes already work on their own
+        via Textual's distinct MouseScrollLeft/Right events, when the
+        terminal reports them — untouched here.
+        """
+        original_scroll_down = ContentTabs._on_mouse_scroll_down
+        original_scroll_up = ContentTabs._on_mouse_scroll_up
+
+        def _on_mouse_scroll_down(tabs: ContentTabs, event: events.MouseScrollDown) -> None:
+            if tabs.tabbed_content.id == "right-tabs":
+                if tabs.query_one("#tabs-scroll")._scroll_right_for_pointer(animate=False):
+                    event.stop()
+                return
+            original_scroll_down(tabs, event)
+
+        def _on_mouse_scroll_up(tabs: ContentTabs, event: events.MouseScrollUp) -> None:
+            if tabs.tabbed_content.id == "right-tabs":
+                if tabs.query_one("#tabs-scroll")._scroll_left_for_pointer(animate=False):
+                    event.stop()
+                return
+            original_scroll_up(tabs, event)
+
+        ContentTabs._on_mouse_scroll_down = _on_mouse_scroll_down
+        ContentTabs._on_mouse_scroll_up = _on_mouse_scroll_up
+
     def on_mount(self):
 
         self._fill_bars()
+        self._enable_horizontal_tab_scroll()
 
         log_widget = self.query_one("#logs", RichLog)
         set_log_widget(log_widget)
@@ -429,6 +470,7 @@ class IR3DEApp(App):
         drawer = self.query_one("#filter-drawer")
         if drawer.styles.display != "none":
             self._layout_filter_chips()
+        self._resize_tabs_scroll_for_buttons()
     
     def _fill_bars(self):
         bar = "═" * self.app.size.width
@@ -1265,13 +1307,62 @@ class IR3DEApp(App):
 
         # 3. Mount the [+] / ☰ buttons pair.
         tabs_bar = tabbed.query_one("Tabs")
-        tabs_bar.mount(
+        await tabs_bar.mount(
             Horizontal(
                 Static("[+]", id="new-chat-button"),
                 Static("☰", id="chat-menu-button"),
                 id="tab-buttons",
             )
         )
+        # Deferred: right after mount() returns, the buttons' own layout
+        # (outer_size) hasn't necessarily settled yet, which would make this
+        # compute against a stale/zero size. call_after_refresh guarantees it
+        # runs after the next full layout pass. The end-scroll (below) has to
+        # wait for a *further* refresh after that — max_scroll_x won't
+        # reflect the narrower width until a layout pass has run with it in
+        # place — so it's chained from inside this call rather than scheduled
+        # up front alongside it.
+        self.call_after_refresh(self._resize_tabs_then_scroll_to_end)
+
+    def _resize_tabs_then_scroll_to_end(self) -> None:
+        self._resize_tabs_scroll_for_buttons()
+        # The fresh empty chat (mounted rightmost, earlier in
+        # _populate_chat_tabs) was made active before the tab row had its
+        # final width or the restored tabs' widths had settled, so Textual's
+        # own scroll-into-view could land short — with enough restored
+        # chats, the active "new chat" tab ends up scrolled out of view on
+        # startup. Force it fully into view once the resize above has
+        # actually been reflected in a layout pass.
+        self.call_after_refresh(self._scroll_chat_tabs_to_end)
+
+    def _scroll_chat_tabs_to_end(self) -> None:
+        try:
+            tabs_scroll = self.query_one("#right-tabs Tabs #tabs-scroll")
+        except Exception:
+            return
+        tabs_scroll.scroll_to(x=tabs_scroll.max_scroll_x, animate=False, force=True)
+
+    def _resize_tabs_scroll_for_buttons(self) -> None:
+        """The [+]/☰ buttons sit on the "overlay" layer, docked right —
+        that layer has its own independent layout, so it doesn't reserve any
+        space within the tab row itself. Textual's own scroll-the-active-
+        tab-into-view logic (triggered every time `.active` changes — new
+        chat, switching tabs, etc.) doesn't know that, and can end up
+        centering a newly active tab (especially the last one, right after
+        creating a new chat) partly under the buttons. Padding alone doesn't
+        fix this — it changes how content is laid out inside the viewport,
+        not how far the viewport can actually scroll. Shrinking the
+        viewport's own width does: it genuinely reduces max_scroll_x, so
+        even scrolled all the way to the end, tabs never reach the reserved
+        area. Called at mount and on every resize, since it's a fixed cell
+        count computed from the current terminal width."""
+        try:
+            tabs_bar = self.query_one("#right-tabs Tabs")
+            button_pair = tabs_bar.query_one("#tab-buttons")
+            tabs_scroll = tabs_bar.query_one("#tabs-scroll")
+        except Exception:
+            return
+        tabs_scroll.styles.width = max(0, tabs_bar.size.width - button_pair.outer_size.width)
 
     def _mount_chat_tab(self, chat_id: str, chat: dict):
         """Mount a chat's TabPane and its RichLog. Returns the AwaitComplete
