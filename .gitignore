@@ -18,7 +18,7 @@ __pycache__/**
 logs
 logs/**
 /ir3de_stats/*
-!/ir3de_stats/default_stats.yml
+!/ir3de_stats/default_stats.json
 test_**
 chats/**
 .git**

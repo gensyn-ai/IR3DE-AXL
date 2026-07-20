@@ -37,6 +37,9 @@ def get_args():
     parser.add_argument("--ir3de-lambda", type=float, default=0.01)
     parser.add_argument("--ir3de-entropy-top-k", type=int, default=10)
     parser.add_argument("--max-answer-length", type=int, default=256)
+    parser.add_argument("--answer-timeout", type=int, default=300,
+                        help="Seconds to wait for an expert's answer (local generation or a "
+                             "remote peer's reply) before giving up.")
     parser.add_argument( "--num-characters-conversation-history", type=int, default=1000, 
                         help="Maximum character budget for the prompt sent to experts (system "
                              "prompt + summary + history). When exceeded, oldest user/agent pairs "
@@ -202,7 +205,11 @@ def run_peer(app, args):
 def handle_input(app, args, user_input):
     chat_id = getattr(app.peer, "active_chat_id", None)
     log(f"{user_input}", node_id="USER", msg_type=None, right=True, chat_id=chat_id)
-    app.peer.handle_user_input(user_input)
+    app.call_from_thread(app.start_waiting_for_answer, chat_id)
+    try:
+        app.peer.handle_user_input(user_input, timeout=args.answer_timeout)
+    finally:
+        app.call_from_thread(app.maybe_stop_waiting_for_answer, chat_id)
 
 
 def main():

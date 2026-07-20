@@ -49,6 +49,9 @@ class IR3DEApp(App):
         self._latency_metric = "prompt"   # one of: 'prompt' | 'total' | 'input'
         self._loading_label = "Initializing AXL backend"
         self._right_spinner_active = True
+        self._pending_answer_chat_id: str | None = None   # chat_id currently awaiting an answer, if any
+        self._waiting_dots: int = 0
+        self._waiting_timer = None
 
     def compose(self) -> ComposeResult:
 
@@ -336,16 +339,76 @@ class IR3DEApp(App):
             self._hide_chat_placeholder(self.peer.active_chat_id)
         user_text = event.value
         if self.input_handler is not None:
-            # input_handler ultimately blocks on future.result() while the expert
-            # generates (peer.py's _continue_handle_user_input) — this handler runs
-            # on the main/event-loop thread, so calling it inline freezes the whole
-            # UI for the duration of generation. Run it off-thread instead.
             threading.Thread(
                 target=self.input_handler,
                 args=(self, self.args, user_text),
                 daemon=True,
                 name="handle-input",
             ).start()
+
+    def _is_chat_awaiting_answer(self, chat_id: str | None) -> bool:
+        if self.peer is None or chat_id is None:
+            return False
+        return self.peer.is_awaiting_answer(chat_id)
+
+    def start_waiting_for_answer(self, chat_id: str | None) -> None:
+        """Disable the input and show an animated waiting message. Called via
+        app.call_from_thread from run_simulation.handle_input, so this
+        already runs on the main thread — do the widget updates directly
+        rather than through disable_input(), which does its own
+        call_from_thread and would raise (Textual forbids calling
+        call_from_thread from the app's own thread)."""
+        self._pending_answer_chat_id = chat_id
+        self._waiting_dots = 0
+        self.query_one("#send-button", Static).disabled = True
+        self._refresh_waiting_message()
+        if self._waiting_timer is None:
+            self._waiting_timer = self.set_interval(0.5, self._tick_waiting_msg)
+
+    def maybe_stop_waiting_for_answer(self, chat_id: str | None) -> None:
+        """Called right after input_handler returns. Local generation and
+        validation failures resolve synchronously, so this stops the wait
+        immediately for those. A remote answer resolves later, in a
+        different thread (recv_loop); _tick_waiting_msg's periodic check
+        catches that case once it actually lands."""
+        if not self._is_chat_awaiting_answer(chat_id):
+            self._stop_waiting_for_answer()
+
+    def _tick_waiting_msg(self) -> None:
+        if not self._is_chat_awaiting_answer(self._pending_answer_chat_id):
+            self._stop_waiting_for_answer()
+            return
+        self._waiting_dots = (self._waiting_dots + 1) % 4
+        self._refresh_waiting_message()
+
+    def _refresh_waiting_message(self) -> None:
+        """Show the right waiting message for whichever chat is currently
+        active — the pending chat itself, or a different one the user
+        switched to while it's still processing. Re-asserts disabled=True
+        on every call as a safety net."""
+        if self._pending_answer_chat_id is None:
+            return
+        active_chat_id = self.peer.active_chat_id if self.peer is not None else None
+        if active_chat_id == self._pending_answer_chat_id:
+            label = "Waiting for the answer"
+        else:
+            label = "Awaiting for an answer in another chat"
+        input_widget = self.query_one("#user-input", SubmittableTextArea)
+        input_widget.disabled = True
+        input_widget.text = label + "." * self._waiting_dots
+        self.query_one("#prompt", Static).styles.color = "#444444"
+
+    def _stop_waiting_for_answer(self) -> None:
+        self._pending_answer_chat_id = None
+        if self._waiting_timer is not None:
+            self._waiting_timer.stop()
+            self._waiting_timer = None
+        input_widget = self.query_one("#user-input", SubmittableTextArea)
+        input_widget.text = ""
+        input_widget.disabled = False
+        input_widget.focus()
+        self.query_one("#prompt", Static).styles.color = "#888888"
+        self.query_one("#send-button", Static).disabled = False
 
     def _hide_chat_placeholder(self, chat_id: str) -> None:
         """Hide the 'Write a message below' placeholder for a chat. Uses query()
@@ -1249,6 +1312,8 @@ class IR3DEApp(App):
             chat_id = tab_id[len(prefix):]
             if chat_id in self.peer.chats:
                 self.peer.active_chat_id = chat_id
+                if self._pending_answer_chat_id is not None:
+                    self._refresh_waiting_message()
 
     def _show_loading_models(self) -> None:
         """Swap the animated loading message to 'Loading local models' once

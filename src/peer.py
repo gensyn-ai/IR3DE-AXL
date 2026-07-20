@@ -1,4 +1,5 @@
 import os, pathlib, subprocess, uuid, requests, json, time, random, signal, atexit, threading
+import multiprocessing
 
 import torch
 import torch.nn.functional as F
@@ -100,7 +101,21 @@ class Peer:
         # main process's event loop responsive regardless of what this one
         # is doing. atexit-registered since a ProcessPoolExecutor spawns a
         # real OS process that must be torn down on exit.
-        self.model_executor = ProcessPoolExecutor(max_workers=1, initializer=model_worker.init_worker)
+        #
+        # mp_context="spawn": this process may already have touched CUDA by
+        # the time the pool is created (e.g. torch.cuda.is_available() just
+        # above). The default start method on Linux is "fork", which clones
+        # this process's memory — including any live CUDA context — into
+        # the worker. CUDA contexts cannot survive a fork (NVIDIA's driver
+        # forbids it: "Cannot re-initialize CUDA in forked subprocess").
+        # "spawn" launches a genuinely fresh interpreter instead, so the
+        # worker initializes its own CUDA context from scratch, independent
+        # of whatever this process has already done.
+        self.model_executor = ProcessPoolExecutor(
+            max_workers=1,
+            initializer=model_worker.init_worker,
+            mp_context=multiprocessing.get_context("spawn"),
+        )
         atexit.register(self.model_executor.shutdown)
 
         self.models_info = metadata.get("models", [])
@@ -156,6 +171,14 @@ class Peer:
         self.active_chat_id: str | None = None
         self.tmp_trimmed_pairs: dict[str, list] = {}
         self.pending_continuations: dict[str, dict] = {}
+        # Explicit "is chat X still waiting for an answer" tracking, for the UI's
+        # waiting indicator. pending_continuations/awaiting_acks are narrow,
+        # network-ack-specific bookkeeping (they don't cover local generation at
+        # all, and awaiting_acks is keyed by msg_id with mixed entry types) — this
+        # is the one authoritative signal, marked once per user message at
+        # dispatch and resolved exactly once at whichever terminal point the
+        # request reaches, regardless of local/remote or summary-continuation hops.
+        self.pending_answers: dict[str, int] = {}
 
         # Load chats authored by THIS peer; create one new chat if none.
         existing = chats.list_chats()
@@ -482,6 +505,8 @@ class Peer:
                             self.peer_id, msg_type="text")
 
                         chat_id = pending.get("chat_id")
+                        if chat_id:
+                            self._mark_answer_resolved(chat_id)
                         chat = self.chats.get(chat_id) if chat_id else None
                         if sel is not None and chat is not None:
                             chats.add_agent_message(
@@ -777,8 +802,11 @@ class Peer:
             chat_id = info.get('chat_id')
             chat = self.chats.get(chat_id) if chat_id else None
 
-            if info.get('type') == 'text' and chat is not None:
-                chats.mark_last_user_failed(chat)
+            if info.get('type') == 'text':
+                if chat is not None:
+                    chats.mark_last_user_failed(chat)
+                if chat_id:
+                    self._mark_answer_resolved(chat_id)
 
             elif info.get('type') == 'summary-req':
                 log("Summary request expired; proceeding with trimmed history (no summary).",
@@ -1073,7 +1101,23 @@ class Peer:
 
         return (peer_pk, model_idx)
 
-    
+    def _mark_answer_pending(self, chat_id) -> None:
+        self.pending_answers[chat_id] = self.pending_answers.get(chat_id, 0) + 1
+
+    def _mark_answer_resolved(self, chat_id) -> None:
+        if chat_id not in self.pending_answers:
+            return
+        self.pending_answers[chat_id] -= 1
+        if self.pending_answers[chat_id] <= 0:
+            del self.pending_answers[chat_id]
+
+    def is_awaiting_answer(self, chat_id) -> bool:
+        """True iff a user message for this chat has been dispatched (locally
+        or to a remote peer, possibly via a summary-continuation detour) and
+        hasn't reached a terminal outcome yet. Authoritative for the UI's
+        waiting indicator."""
+        return self.pending_answers.get(chat_id, 0) > 0
+
     def handle_user_input(self, user_input, timeout=60):
 
         chat = self.get_active_chat()
@@ -1086,6 +1130,12 @@ class Peer:
             log("This chat is still waiting for a remote summary. Please wait for it to complete before submitting another message.", self.peer_id, msg_type="warning")
             log("Waiting for previous response to complete...", self.peer_id, msg_type="warning", right=True, chat_id=chat_id)
             return
+
+        # Marked once here, resolved exactly once at whichever terminal point
+        # this request eventually reaches below (including inside
+        # _continue_handle_user_input, possibly after a summary-continuation
+        # detour) — see is_awaiting_answer().
+        self._mark_answer_pending(chat_id)
 
         start_time = time.time()
 
@@ -1118,6 +1168,7 @@ class Peer:
                     self.peer_id, msg_type="warning")
                 log("Cannot handle user input. Please select at least one expertise in the Control Panel.",
                     self.peer_id, msg_type="warning", right=True, chat_id=chat_id)
+                self._mark_answer_resolved(chat_id)
                 return
 
             assigned_tag = self.find_best_tag(*out, user_input)
@@ -1128,6 +1179,7 @@ class Peer:
                 err = f"Cannot handle user input because no suitable model was found for the assigned tag '{assigned_tag}'."
                 log(err, self.peer_id, msg_type="warning")
                 log(err, self.peer_id, msg_type="warning", right=True, chat_id=chat_id)
+                self._mark_answer_resolved(chat_id)
                 return
 
         tag_for_msg = assigned_tag if assigned_tag and assigned_tag != "(unrouted)" else None
@@ -1169,7 +1221,12 @@ class Peer:
         if chat is None:
             log(f"Cannot continue user input: chat {chat_id} not found.",
                 self.peer_id, msg_type="warning")
+            self._mark_answer_resolved(chat_id)
             return
+        # Resolved in the finally below on every exit path except the one
+        # where the remote send actually succeeds — that stays pending until
+        # recv_loop's 'answer' handler or check_acks' timeout resolves it.
+        resolved_later = False
         try:
             prompt = format_prompt_for_expert(chat)
 
@@ -1266,9 +1323,13 @@ class Peer:
                 "tag":        tag_for_msg,
                 "timestamp":  time.time(),
             }
+            resolved_later = True
 
         except Exception as e:
             log(f"Error in _continue_handle_user_input: {e}", self.peer_id, msg_type="warning")
+        finally:
+            if not resolved_later:
+                self._mark_answer_resolved(chat_id)
 
     def stop_node(self, timeout=5):
         """Stop the AXL node subprocess deterministically and idempotently.
