@@ -11,6 +11,8 @@ class SubmittableTextArea(TextArea):
 
     def submit(self):
         value = self.text
+        if not value.strip():
+            return
         self.text = ""
         self.post_message(self.Submitted(value))
 

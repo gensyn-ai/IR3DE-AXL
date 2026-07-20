@@ -143,13 +143,22 @@ def get_clm_dataloaders(dataset_name: str, batch_size: int, num_workers: int, dr
 def get_m_arc_merged_dataset(max_num_samples, task, split):
     remaining_samples = max_num_samples
     dataset = []
+    offsets = {name: 0 for name in task.keys()}  # type: ignore
     while remaining_samples > 0:
         num_samples_per_arc = max(1, int(remaining_samples / len(task.keys())))  # type: ignore
+        made_progress = False
         for arc_task_name in task.keys():  # type: ignore
-            dataset.extend(list(task[arc_task_name].dataset[split])[:num_samples_per_arc])
-            remaining_samples -= num_samples_per_arc
+            start = offsets[arc_task_name]
+            chunk = list(task[arc_task_name].dataset[split])[start:start + num_samples_per_arc]
+            if chunk:
+                made_progress = True
+            dataset.extend(chunk)
+            offsets[arc_task_name] = start + len(chunk)
+            remaining_samples -= len(chunk)
             if remaining_samples <= 0:
                 break
+        if not made_progress:
+            break  # every language's dataset is exhausted; can't reach max_num_samples
     return dataset
 
 

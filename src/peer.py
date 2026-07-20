@@ -431,282 +431,286 @@ class Peer:
                     time.sleep(0.5)
                     continue
                 
-                if msg.get("type") == "text":
+                try:
+                    if msg.get("type") == "text":
 
-                    message = msg.get('message')
-                    log(f"From {sender[:8]}...: {message}", self.peer_id, msg_type="text")
+                        message = msg.get('message')
+                        log(f"From {sender[:8]}...: {message}", self.peer_id, msg_type="text")
 
-                    model_idx = msg['selected_model'][1]
-                    future = self.model_executor.submit(model_worker.generate, model_idx, message, self.max_answer_length)
-                    try:
-                        answer, num_input_tokens, num_output_tokens = future.result(timeout=timeout)
-                    except FuturesTimeoutError:
-                        log(f"Generation timed out after {timeout}s for request from {sender[:8]}...", self.peer_id, msg_type="warning")
-                        time.sleep(0.5)
-                        continue
-                    except Exception as e:
-                        log(f"Generation failed for request from {sender[:8]}...: {e}", self.peer_id, msg_type="warning")
-                        time.sleep(0.5)
-                        continue
-                    log(f"To {sender[:8]}...: {answer}", self.peer_id, msg_type="text")
+                        model_idx = msg['selected_model'][1]
+                        future = self.model_executor.submit(model_worker.generate, model_idx, message, self.max_answer_length)
+                        try:
+                            answer, num_input_tokens, num_output_tokens = future.result(timeout=timeout)
+                        except FuturesTimeoutError:
+                            log(f"Generation timed out after {timeout}s for request from {sender[:8]}...", self.peer_id, msg_type="warning")
+                            time.sleep(0.5)
+                            continue
+                        except Exception as e:
+                            log(f"Generation failed for request from {sender[:8]}...: {e}", self.peer_id, msg_type="warning")
+                            time.sleep(0.5)
+                            continue
+                        log(f"To {sender[:8]}...: {answer}", self.peer_id, msg_type="text")
 
-                    # If the requester asked for a title, generate one with the same expert
-                    # that just answered. The user's text is the last 'User:' block of the
-                    # received prompt; for the first turn that's the only one.
-                    title = ""
-                    if msg.get("request_title"):
-                        user_text = ""
-                        if isinstance(message, str):
-                            # Take everything after the last "User:" up to the next "Agent:"
-                            # (works because we always end the prompt with "Agent: ").
-                            after_user = message.rsplit("User:", 1)
-                            if len(after_user) == 2:
-                                user_text = after_user[1].split("Agent:", 1)[0].strip()
-                        if user_text:
-                            title = self._generate_title(user_text, answer, msg['selected_model'][1])
+                        # If the requester asked for a title, generate one with the same expert
+                        # that just answered. The user's text is the last 'User:' block of the
+                        # received prompt; for the first turn that's the only one.
+                        title = ""
+                        if msg.get("request_title"):
+                            user_text = ""
+                            if isinstance(message, str):
+                                # Take everything after the last "User:" up to the next "Agent:"
+                                # (works because we always end the prompt with "Agent: ").
+                                after_user = message.rsplit("User:", 1)
+                                if len(after_user) == 2:
+                                    user_text = after_user[1].split("Agent:", 1)[0].strip()
+                            if user_text:
+                                title = self._generate_title(user_text, answer, msg['selected_model'][1])
 
 
-                    msg_id = str(uuid.uuid4())
-                    answer_msg = {
-                        "orig_msg_id":       msg.get("msg_id"),
-                        "msg_id":            msg_id,
-                        "type":              "answer",
-                        "from":              self.public_key,
-                        "peer_id":           self.peer_id,
-                        "peer_name":         self.node_name,
-                        "message":           answer,
-                        "selected_model":    msg.get("selected_model"),
-                        "num_input_tokens":  num_input_tokens,
-                        "num_output_tokens": num_output_tokens,
-                        "title":             title,
-                    }
-                    self.send(answer_msg, sender, timeout=timeout)
+                        msg_id = str(uuid.uuid4())
+                        answer_msg = {
+                            "orig_msg_id":       msg.get("msg_id"),
+                            "msg_id":            msg_id,
+                            "type":              "answer",
+                            "from":              self.public_key,
+                            "peer_id":           self.peer_id,
+                            "peer_name":         self.node_name,
+                            "message":           answer,
+                            "selected_model":    msg.get("selected_model"),
+                            "num_input_tokens":  num_input_tokens,
+                            "num_output_tokens": num_output_tokens,
+                            "title":             title,
+                        }
+                        self.send(answer_msg, sender, timeout=timeout)
                 
-                elif msg.get("type") == "answer":
+                    elif msg.get("type") == "answer":
 
-                    log(f"Received answer from {sender[:8]}...", self.peer_id, msg_type="text")
-                    orig = msg.get("orig_msg_id")
-                    pending = self.awaiting_acks.pop(orig, None) if orig else None
-                    chat_id_for_log = pending.get("chat_id") if pending else None
-                    log(f"{msg.get('message')}", msg.get("peer_id"), msg_type="text", right=True, chat_id=chat_id_for_log)
+                        log(f"Received answer from {sender[:8]}...", self.peer_id, msg_type="text")
+                        orig = msg.get("orig_msg_id")
+                        pending = self.awaiting_acks.pop(orig, None) if orig else None
+                        chat_id_for_log = pending.get("chat_id") if pending else None
+                        log(f"{msg.get('message')}", msg.get("peer_id"), msg_type="text", right=True, chat_id=chat_id_for_log)
 
-                    if pending is not None:
-                        log(f"Removing message ID {orig[:8]}... from awaiting ACKs.", self.peer_id, msg_type="ir3de-ack")
+                        if pending is not None:
+                            log(f"Removing message ID {orig[:8]}... from awaiting ACKs.", self.peer_id, msg_type="ir3de-ack")
 
-                        prompt_latency = time.time() - pending["timestamp"]
-                        num_input_tokens = int(msg.get("num_input_tokens"))
-                        num_output_tokens = int(msg.get("num_output_tokens"))
-                        num_total_tokens = num_input_tokens + num_output_tokens
+                            prompt_latency = time.time() - pending["timestamp"]
+                            num_input_tokens = int(msg.get("num_input_tokens"))
+                            num_output_tokens = int(msg.get("num_output_tokens"))
+                            num_total_tokens = num_input_tokens + num_output_tokens
 
-                        latency_per_total = prompt_latency / num_total_tokens
-                        latency_per_input = prompt_latency / num_input_tokens
+                            latency_per_total = prompt_latency / num_total_tokens
+                            latency_per_input = prompt_latency / num_input_tokens
 
-                        sel = msg.get("selected_model")
-                        model_idx = sel[1]
-                        info = self.known_public_keys[sender]
-                        latencies_dict = info.setdefault("model_latencies", {})
-                        entries = latencies_dict.setdefault(model_idx, [])
-                        entries.append({
-                            "prompt_latency":          prompt_latency,
-                            "num_input_tokens":        num_input_tokens,
-                            "num_output_tokens":       num_output_tokens,
-                            "latency_per_total_token": latency_per_total,
-                            "latency_per_input_token": latency_per_input,
-                        })
+                            sel = msg.get("selected_model")
+                            model_idx = sel[1]
+                            info = self.known_public_keys[sender]
+                            latencies_dict = info.setdefault("model_latencies", {})
+                            entries = latencies_dict.setdefault(model_idx, [])
+                            entries.append({
+                                "prompt_latency":          prompt_latency,
+                                "num_input_tokens":        num_input_tokens,
+                                "num_output_tokens":       num_output_tokens,
+                                "latency_per_total_token": latency_per_total,
+                                "latency_per_input_token": latency_per_input,
+                            })
 
-                        log(f"Prompt latency to peer {sender[:8]}... (model idx {model_idx}): "
-                            f"{prompt_latency:.4f} s [in={num_input_tokens} tok, out={num_output_tokens} tok]",
-                            self.peer_id, msg_type="text")
-                        log(f"Latency per total token: {latency_per_total*1000:.2f} ms/tok "
-                            f"({num_total_tokens} tokens total)",
-                            self.peer_id, msg_type="text")
-                        log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok",
-                            self.peer_id, msg_type="text")
+                            log(f"Prompt latency to peer {sender[:8]}... (model idx {model_idx}): "
+                                f"{prompt_latency:.4f} s [in={num_input_tokens} tok, out={num_output_tokens} tok]",
+                                self.peer_id, msg_type="text")
+                            log(f"Latency per total token: {latency_per_total*1000:.2f} ms/tok "
+                                f"({num_total_tokens} tokens total)",
+                                self.peer_id, msg_type="text")
+                            log(f"Latency per input token: {latency_per_input*1000:.2f} ms/tok",
+                                self.peer_id, msg_type="text")
 
-                        chat_id = pending.get("chat_id")
-                        if chat_id:
-                            self._mark_answer_resolved(chat_id)
+                            chat_id = pending.get("chat_id")
+                            if chat_id:
+                                self._mark_answer_resolved(chat_id)
+                            chat = self.chats.get(chat_id) if chat_id else None
+                            if sel is not None and chat is not None:
+                                chats.add_agent_message(
+                                    chat, msg.get("message", ""),
+                                    peer_pk=sel[0],
+                                    model_idx=sel[1],
+                                    tag=pending.get("tag"),
+                                )
+                                title = msg.get("title")
+                                if title and chat.get("title") is None:
+                                    cleaned = self._clean_title(title)
+                                    if cleaned:
+                                        chats.set_title(chat, cleaned)
+                                        log(f"Chat title set: '{cleaned}'", self.peer_id, msg_type="text")
+
+                    elif msg.get("type") == 'summary-req':
+                        log(f"Received summary request from {sender[:8]}...", self.peer_id, msg_type="summary-req")
+                        sum_prompt = msg.get("message")
+                        max_chars = msg.get("max_chars")
+                        model_idx = msg.get("model_idx")
+                        new_summary = self._summarize(sum_prompt, max_chars, model_idx=model_idx)
+                        msg_id = str(uuid.uuid4())
+                        reply = {
+                            "msg_id":         msg_id,
+                            "orig_msg_id":    msg.get("msg_id"),
+                            "type":           "summary",
+                            "from":           self.public_key,
+                            "to":             msg.get("from"),
+                            "summary":        new_summary
+                        }
+                        self.send(reply, msg.get("from"), timeout=timeout)
+
+                    elif msg.get("type") == 'summary':
+                        log(f"Received summary from {sender[:8]}...", self.peer_id, msg_type="summary")
+                        orig = msg.get("orig_msg_id")
+                        pending = self.awaiting_acks.pop(orig, None) if orig else None
+                        if pending is not None:
+                            log(f"Removed message ID {orig[:8]}... from awaiting ACKs.", self.peer_id, msg_type="summary-ack")
+
+                        chat_id = pending.get("chat_id") if pending else None
                         chat = self.chats.get(chat_id) if chat_id else None
-                        if sel is not None and chat is not None:
-                            chats.add_agent_message(
-                                chat, msg.get("message", ""),
-                                peer_pk=sel[0],
-                                model_idx=sel[1],
-                                tag=pending.get("tag"),
-                            )
-                            title = msg.get("title")
-                            if title and chat.get("title") is None:
-                                cleaned = self._clean_title(title)
-                                if cleaned:
-                                    chats.set_title(chat, cleaned)
-                                    log(f"Chat title set: '{cleaned}'", self.peer_id, msg_type="text")
+                        trimmed_pairs = self.tmp_trimmed_pairs.pop(chat_id, None) if chat_id else None
 
-                elif msg.get("type") == 'summary-req':
-                    log(f"Received summary request from {sender[:8]}...", self.peer_id, msg_type="summary-req")
-                    sum_prompt = msg.get("message")
-                    max_chars = msg.get("max_chars")
-                    model_idx = msg.get("model_idx")
-                    new_summary = self._summarize(sum_prompt, max_chars, model_idx=model_idx)
-                    msg_id = str(uuid.uuid4())
-                    reply = {
-                        "msg_id":         msg_id,
-                        "orig_msg_id":    msg.get("msg_id"),
-                        "type":           "summary",
-                        "from":           self.public_key,
-                        "to":             msg.get("from"),
-                        "summary":        new_summary
-                    }
-                    self.send(reply, msg.get("from"), timeout=timeout)
+                        new_summary = msg.get("summary")
+                        if new_summary and chat is not None:
+                            self._handle_summary(new_summary, chat, trimmed_pairs or [])
+                        else:
+                            log("Remote summarization produced an empty result; keeping previous summary.", self.peer_id, msg_type="warning")
 
-                elif msg.get("type") == 'summary':
-                    log(f"Received summary from {sender[:8]}...", self.peer_id, msg_type="summary")
-                    orig = msg.get("orig_msg_id")
-                    pending = self.awaiting_acks.pop(orig, None) if orig else None
-                    if pending is not None:
-                        log(f"Removed message ID {orig[:8]}... from awaiting ACKs.", self.peer_id, msg_type="summary-ack")
-
-                    chat_id = pending.get("chat_id") if pending else None
-                    chat = self.chats.get(chat_id) if chat_id else None
-                    trimmed_pairs = self.tmp_trimmed_pairs.pop(chat_id, None) if chat_id else None
-
-                    new_summary = msg.get("summary")
-                    if new_summary and chat is not None:
-                        self._handle_summary(new_summary, chat, trimmed_pairs or [])
-                    else:
-                        log("Remote summarization produced an empty result; keeping previous summary.", self.peer_id, msg_type="warning")
-
-                    if chat_id and chat_id in self.pending_continuations:
-                        state = self.pending_continuations.pop(chat_id)
-                        threading.Thread(
-                            target=self._continue_handle_user_input,
-                            kwargs=state,
-                            daemon=True,
-                            name="continue-user-input",
-                        ).start()
+                        if chat_id and chat_id in self.pending_continuations:
+                            state = self.pending_continuations.pop(chat_id)
+                            threading.Thread(
+                                target=self._continue_handle_user_input,
+                                kwargs=state,
+                                daemon=True,
+                                name="continue-user-input",
+                            ).start()
                 
-                elif msg.get("type") in ("greeting", "greeting-ack"):
+                    elif msg.get("type") in ("greeting", "greeting-ack"):
 
-                    log(f"Received greeting from {sender[:8]}: {msg.get('message')}", self.peer_id, msg_type=msg.get("type"))
+                        log(f"Received greeting from {sender[:8]}: {msg.get('message')}", self.peer_id, msg_type=msg.get("type"))
 
-                    if sender not in self.known_public_keys and msg.get("peer_id") != self.peer_id:
-                        log(f"New node discovered with ID = {msg.get('peer_id')}!", self.peer_id, msg_type="newnode")
-                        self.known_public_keys[sender] = {}
-                        self.known_public_keys[sender]["peer_id"] = msg.get("peer_id")
-                        self.known_public_keys[sender]["peer_name"] = msg.get("peer_name")
+                        if sender not in self.known_public_keys and msg.get("peer_id") != self.peer_id:
+                            log(f"New node discovered with ID = {msg.get('peer_id')}!", self.peer_id, msg_type="newnode")
+                            self.known_public_keys[sender] = {}
+                            self.known_public_keys[sender]["peer_id"] = msg.get("peer_id")
+                            self.known_public_keys[sender]["peer_name"] = msg.get("peer_name")
 
-                    if msg.get("type") == "greeting":
-                        log(f"Sending greeting back to Node {msg.get('peer_id')}...", self.peer_id, msg_type="greeting-ack")
-                        greetings = {
+                        if msg.get("type") == "greeting":
+                            log(f"Sending greeting back to Node {msg.get('peer_id')}...", self.peer_id, msg_type="greeting-ack")
+                            greetings = {
+                                "msg_id": msg.get("msg_id"),
+                                "type": "greeting-ack",
+                                "from": self.public_key,
+                                "peer_id": self.peer_id,
+                                "peer_name": self.node_name,
+                                "message": f"Hello from node {self.peer_id}!"
+                            }
+                            self.send(greetings, sender, timeout=timeout)
+                    
+                        if msg.get("type") == "greeting-ack":
+                            pending = self.awaiting_acks.pop(msg.get("msg_id"), None)
+                            if pending is not None:
+                                comm_latency = time.time() - pending["timestamp"]
+                                log(f"Received ACK for greeting from Node {msg.get('peer_id')}. Removing from awaiting ACKs.", self.peer_id, msg_type="greeting-ack")
+                                if sender in self.known_public_keys:
+                                    self.known_public_keys[sender].setdefault("comm_latencies", []).append(comm_latency)
+                                log(f"Communication latency to peer {sender[:8]}... (Node {msg.get('peer_id')}): {comm_latency*1000:.2f} ms", self.peer_id, msg_type="greeting-ack")
+
+                    elif msg.get("type") == "knowledge":
+
+                        log(f"Received peers knowledge from {sender[:8]}. Num entries = {len(msg.get('known_peers', {}))}", self.peer_id, msg_type="knowledge")
+                        if sender not in self.known_public_keys:
+                            self.new_peer_discovered(msg, sender)
+
+                        new_peers = 0
+                        for pk, info in msg.get("known_peers", {}).items():
+                            peer_id = info.get("peer_id")
+                            if pk not in self.known_public_keys and ipv6_from_pubkey(pk) != ipv6_from_pubkey(self.public_key):
+                                self.new_peer_discovered({"peer_id": peer_id}, pk)
+                                new_peers += 1
+                    
+                        log(f"Updated known peers with knowledge from Node {msg.get('peer_id')}. New peers added: {new_peers}. Total known peers: {len(self.known_public_keys)}.", self.peer_id, msg_type="knowledge")
+                    
+                        knowledge_ack = {
                             "msg_id": msg.get("msg_id"),
-                            "type": "greeting-ack",
+                            "type": "knowledge-ack",
                             "from": self.public_key,
                             "peer_id": self.peer_id,
-                            "peer_name": self.node_name,
-                            "message": f"Hello from node {self.peer_id}!"
+                            "peer_name": self.node_name
                         }
-                        self.send(greetings, sender, timeout=timeout)
-                    
-                    if msg.get("type") == "greeting-ack":
-                        pending = self.awaiting_acks.pop(msg.get("msg_id"), None)
-                        if pending is not None:
-                            comm_latency = time.time() - pending["timestamp"]
-                            log(f"Received ACK for greeting from Node {msg.get('peer_id')}. Removing from awaiting ACKs.", self.peer_id, msg_type="greeting-ack")
-                            if sender in self.known_public_keys:
-                                self.known_public_keys[sender].setdefault("comm_latencies", []).append(comm_latency)
-                            log(f"Communication latency to peer {sender[:8]}... (Node {msg.get('peer_id')}): {comm_latency*1000:.2f} ms", self.peer_id, msg_type="greeting-ack")
-
-                elif msg.get("type") == "knowledge":
-
-                    log(f"Received peers knowledge from {sender[:8]}. Num entries = {len(msg.get('known_peers', {}))}", self.peer_id, msg_type="knowledge")
-                    if sender not in self.known_public_keys:
-                        self.new_peer_discovered(msg, sender)
-
-                    new_peers = 0
-                    for pk, info in msg.get("known_peers", {}).items():
-                        peer_id = info.get("peer_id")
-                        if pk not in self.known_public_keys and ipv6_from_pubkey(pk) != ipv6_from_pubkey(self.public_key):
-                            self.new_peer_discovered({"peer_id": peer_id}, pk)
-                            new_peers += 1
-                    
-                    log(f"Updated known peers with knowledge from Node {msg.get('peer_id')}. New peers added: {new_peers}. Total known peers: {len(self.known_public_keys)}.", self.peer_id, msg_type="knowledge")
-                    
-                    knowledge_ack = {
-                        "msg_id": msg.get("msg_id"),
-                        "type": "knowledge-ack",
-                        "from": self.public_key,
-                        "peer_id": self.peer_id,
-                        "peer_name": self.node_name
-                    }
-                    self.send(knowledge_ack, sender, timeout=timeout)
+                        self.send(knowledge_ack, sender, timeout=timeout)
                 
-                elif msg.get("type") == "info":
+                    elif msg.get("type") == "info":
 
-                    log(f"Received peers models and stats info from {sender[:8]}. Num models = {len(msg.get('models_info', {}))}, num stats = {len(msg.get('stats_info', {}))}", self.peer_id, msg_type="info")
-                    if sender not in self.known_public_keys:
-                        self.new_peer_discovered(msg, sender)
+                        log(f"Received peers models and stats info from {sender[:8]}. Num models = {len(msg.get('models_info', {}))}, num stats = {len(msg.get('stats_info', {}))}", self.peer_id, msg_type="info")
+                        if sender not in self.known_public_keys:
+                            self.new_peer_discovered(msg, sender)
                     
-                    # Preserve locally-tracked num_requests across info updates
-                    new_models_info = msg.get("models_info", [])
-                    old_models_info = self.known_public_keys[sender].get("models_info", [])
-                    for i, new_mi in enumerate(new_models_info):
-                        if i < len(old_models_info):
-                            if "num_requests" in old_models_info[i]:
-                                new_mi["num_requests"] = old_models_info[i]["num_requests"]
+                        # Preserve locally-tracked num_requests across info updates
+                        new_models_info = msg.get("models_info", [])
+                        old_models_info = self.known_public_keys[sender].get("models_info", [])
+                        for i, new_mi in enumerate(new_models_info):
+                            if i < len(old_models_info):
+                                if "num_requests" in old_models_info[i]:
+                                    new_mi["num_requests"] = old_models_info[i]["num_requests"]
                     
-                    self.known_public_keys[sender]["models_info"] = new_models_info
-                    self.known_public_keys[sender]["stats_info"] = msg.get("stats_info", [])
+                        self.known_public_keys[sender]["models_info"] = new_models_info
+                        self.known_public_keys[sender]["stats_info"] = msg.get("stats_info", [])
                     
-                    for model_info in msg.get("models_info", []):
-                        for tag in model_info.get("tags", []):
-                            if tag not in self.known_tags:
-                                self.known_tags.append(tag)
-                                log(f"Discovered new tag '{tag}' from Node {msg.get('peer_id')}'s shared models info!", self.peer_id, msg_type="info")
+                        for model_info in msg.get("models_info", []):
+                            for tag in model_info.get("tags", []):
+                                if tag not in self.known_tags:
+                                    self.known_tags.append(tag)
+                                    log(f"Discovered new tag '{tag}' from Node {msg.get('peer_id')}'s shared models info!", self.peer_id, msg_type="info")
                     
-                    for stats_info in msg.get("stats_info", []):
-                        for tag in stats_info.get("tags", []):
-                            if tag not in self.known_tags:
-                                self.known_tags.append(tag)
-                                log(f"Discovered new tag '{tag}' from Node {msg.get('peer_id')}'s shared stats info!", self.peer_id, msg_type="info")
+                        for stats_info in msg.get("stats_info", []):
+                            for tag in stats_info.get("tags", []):
+                                if tag not in self.known_tags:
+                                    self.known_tags.append(tag)
+                                    log(f"Discovered new tag '{tag}' from Node {msg.get('peer_id')}'s shared stats info!", self.peer_id, msg_type="info")
 
-                    info_ack = {
-                        "msg_id": msg.get("msg_id"),
-                        "type": "info-ack",
-                        "from": self.public_key,
-                        "peer_id": self.peer_id,
-                        "peer_name": self.node_name
-                    }
-                    self.send(info_ack, sender, timeout=timeout)
+                        info_ack = {
+                            "msg_id": msg.get("msg_id"),
+                            "type": "info-ack",
+                            "from": self.public_key,
+                            "peer_id": self.peer_id,
+                            "peer_name": self.node_name
+                        }
+                        self.send(info_ack, sender, timeout=timeout)
                 
-                elif msg.get("type") == "stats-req":
+                    elif msg.get("type") == "stats-req":
 
-                    tokenizer_name = msg.get("tokenizer_name")
-                    embedder_name = msg.get("embedder_name")
-                    log(f"Received stats request from {sender[:8]} for tokenizer {tokenizer_name} and embedder {embedder_name}.", self.peer_id, msg_type="stats-req")
-                    if sender not in self.known_public_keys:
-                        self.new_peer_discovered(msg, sender)
+                        tokenizer_name = msg.get("tokenizer_name")
+                        embedder_name = msg.get("embedder_name")
+                        log(f"Received stats request from {sender[:8]} for tokenizer {tokenizer_name} and embedder {embedder_name}.", self.peer_id, msg_type="stats-req")
+                        if sender not in self.known_public_keys:
+                            self.new_peer_discovered(msg, sender)
 
-                    self.share_stats(msg.get("msg_id"), tokenizer_name, embedder_name, sender, timeout=timeout)
+                        self.share_stats(msg.get("msg_id"), tokenizer_name, embedder_name, sender, timeout=timeout)
 
-                elif msg.get("type") == "knowledge-ack":
-                    log(f"Received ACK for knowledge from Node {msg.get('peer_id')}.", self.peer_id, msg_type="knowledge-ack")
-                    if msg.get("msg_id") in self.awaiting_acks:
-                        log(f"Removing message ID {msg.get('msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="knowledge-ack")
-                        del self.awaiting_acks[msg.get("msg_id")]
+                    elif msg.get("type") == "knowledge-ack":
+                        log(f"Received ACK for knowledge from Node {msg.get('peer_id')}.", self.peer_id, msg_type="knowledge-ack")
+                        if msg.get("msg_id") in self.awaiting_acks:
+                            log(f"Removing message ID {msg.get('msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="knowledge-ack")
+                            del self.awaiting_acks[msg.get("msg_id")]
 
-                elif msg.get("type") == "info-ack":
-                    log(f"Received ACK for model and stats info from Node {msg.get('peer_id')}.", self.peer_id, msg_type="info-ack")
-                    if msg.get("msg_id") in self.awaiting_acks:
-                        log(f"Removing message ID {msg.get('msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="info-ack")
-                        del self.awaiting_acks[msg.get("msg_id")]
+                    elif msg.get("type") == "info-ack":
+                        log(f"Received ACK for model and stats info from Node {msg.get('peer_id')}.", self.peer_id, msg_type="info-ack")
+                        if msg.get("msg_id") in self.awaiting_acks:
+                            log(f"Removing message ID {msg.get('msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="info-ack")
+                            del self.awaiting_acks[msg.get("msg_id")]
 
-                elif msg.get("type") == "stats-ack":
-                    log(f"Received ACK for stats from Node {msg.get('peer_id')}.", self.peer_id, msg_type="stats-ack")
-                    if msg.get("msg_id") in self.awaiting_acks:
-                        log(f"Removing message ID {msg.get('msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="stats-ack")
-                        del self.awaiting_acks[msg.get("msg_id")]
+                    elif msg.get("type") == "stats-ack":
+                        log(f"Received ACK for stats from Node {msg.get('peer_id')}.", self.peer_id, msg_type="stats-ack")
+                        if msg.get("msg_id") in self.awaiting_acks:
+                            log(f"Removing message ID {msg.get('msg_id')[:8]}... from awaiting ACKs.", self.peer_id, msg_type="stats-ack")
+                            del self.awaiting_acks[msg.get("msg_id")]
 
-                else:
-                    log(f"Received unknown message type from {sender[:8]}, type={msg.get('type')}.", self.peer_id, msg_type="warning")
+                    else:
+                        log(f"Received unknown message type from {sender[:8]}, type={msg.get('type')}.", self.peer_id, msg_type="warning")
+                except Exception as e:
+                    log(f"Error handling message type '{msg.get('type')}' from {sender[:8]}...: {e}", 
+                        self.peer_id, msg_type="warning")
 
             time.sleep(0.5)
 
@@ -1329,9 +1333,8 @@ class Peer:
             if not sent:
                 log(f"Could not reach the peer hosting your selected model ({selected_model[0][:8]}...). "
                     f"It will be deselected automatically if it stays offline; please try again.",
-                    self.peer_id, msg_type="warning", right=True)
-                assert self.current_chat is not None
-                chats.mark_last_user_failed(self.current_chat)
+                    self.peer_id, msg_type="warning", right=True, chat_id=chat_id)
+                chats.mark_last_user_failed(chat)
                 return
 
             self.awaiting_acks[msg_id] = {

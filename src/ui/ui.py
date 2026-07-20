@@ -716,23 +716,6 @@ class IR3DEApp(App):
                                 self._models_sort_column_key,
                                 self._models_sort_reverse)
 
-        data.sort(key=lambda r: r["raw"][self._models_sort_column_key],
-                reverse=self._models_sort_reverse)
-
-        table.clear()
-        for r in data:
-            table.add_row(*r["display"])
-
-        columns = [
-            (self._col_models_type,         "Model Type"),
-            (self._col_models_params,       "Parameters"),
-            (self._col_models_tags,         "Expertise"),
-            (self._col_models_num_requests, "Num requests"),
-        ]
-
-        self._update_sort_arrows(table, columns,
-                                self._models_sort_column_key, self._models_sort_reverse)
-
         # Synchronous restore — eliminates the "snap to 0" frame.
         table.scroll_to(x=saved_x, y=saved_y, animate=False)
         self.call_after_refresh(lambda: table.scroll_to(x=saved_x, y=saved_y, animate=False))

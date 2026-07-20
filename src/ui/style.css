@@ -589,7 +589,7 @@ ChatMenuScreen {
 
 #chat-menu-dialog {
     width: 60;
-    max-height: 24;
+    max-height: 26;
     background: #1a1a1a;
     border: round #237dfa;
     padding: 1 1;
