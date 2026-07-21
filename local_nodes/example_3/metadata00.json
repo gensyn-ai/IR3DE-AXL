@@ -1,0 +1,20 @@
+{
+  "node_id": "00",
+  "node_name": "Odin",
+  "models": [
+    {
+      "hf_name": "MergeBench/Llama-3.2-3B_coding",
+      "tags": ["coding"],
+      "tokenizer": "unsloth/Llama-3.2-3B"
+    }
+  ],
+  "stats": [
+    {
+      "path": "ir3de_stats/Meta-Llama-3-8B_humaneval.pth",
+      "tags": ["coding"],
+      "datasets_names": ["humaneval"],
+      "tokenizer_name": "meta-llama/Meta-Llama-3-8B",
+      "embedder_name": "meta-llama/Meta-Llama-3-8B"
+    }
+  ]
+}

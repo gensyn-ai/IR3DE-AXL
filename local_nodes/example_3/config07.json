@@ -1,0 +1,6 @@
+{
+  "PrivateKeyPath": "local_nodes/pk07.pem",
+  "Peers": ["tls://127.0.0.1:9001"],
+  "Listen": ["tls://127.0.0.1:9007"],
+  "api_port": 9107
+}

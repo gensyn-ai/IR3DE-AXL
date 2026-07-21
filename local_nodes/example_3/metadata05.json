@@ -1,0 +1,12 @@
+{
+  "node_id": "05",
+  "node_name": "Baldr",
+  "models": [
+    {
+      "hf_name": "amitbehura/philosophy-oracle-smollm2-360m",
+      "tags": ["philosophy"],
+      "tokenizer": "amitbehura/philosophy-oracle-smollm2-360m"
+    }
+  ],
+  "stats": []
+}
