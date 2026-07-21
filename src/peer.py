@@ -146,7 +146,14 @@ class Peer:
         # identifier — entries for other identifiers (e.g. Llama stats while
         # running --tok-type mistral) are skipped before ever downloading or
         # torch.load-ing them.
-        all_stats_info = default_stats.get("stats", []) + metadata.get("stats", [])
+        
+        default_stats_list = default_stats.get("stats", [])
+        for s in default_stats_list:
+            s["is_default"] = True
+        metadata_stats_list = metadata.get("stats", [])
+        for s in metadata_stats_list:
+            s.setdefault("is_default", False)
+        all_stats_info = default_stats_list + metadata_stats_list
         seen_paths = set()
         deduped_stats_info = []
         for s in all_stats_info:
@@ -944,7 +951,9 @@ class Peer:
         """Push this peer's model/stats metadata (tags, sizes, dataset names
         — not the stats matrices themselves) to a random sample of known
         peers. Called periodically from run.py's run_peer loop, on the
-        --share-info-interval schedule."""
+        --share-info-interval schedule. Stats from default_stats.json are
+        excluded — every peer already has that same catalog, so advertising
+        (and later sharing) it would be redundant."""
         log(f"Sharing IR3DE local stats and local models info with the network...", self.peer_id, msg_type='info')
         known_pks = list(self.known_public_keys.keys())
         random.shuffle(known_pks)
@@ -971,6 +980,8 @@ class Peer:
                     "name": model_info.get("hf_name", "unknown"),
                 })
             for stats in self.stats_info:
+                if stats.get("is_default"):
+                    continue
                 info_msg["stats_info"].append({
                     "tags": stats.get("tags"),
                     "tokenizer_name": stats.get("tokenizer_name"),
@@ -1043,11 +1054,16 @@ class Peer:
     def share_stats(self, orig_msg_id, tokenizer_name, embedder_name, sender, timeout=5):
         """Reply to a "stats-req" with this peer's stats matching the
         requested tokenizer/embedder, chunked via send(..., large=True).
-        Called from recv_loop's "stats-req" handler."""
+        Called from recv_loop's "stats-req" handler. Stats from
+        default_stats.json are never shared — every peer already has that
+        same catalog locally, so sharing it would just make the receiver
+        double-count data it already has (see get_token_router)."""
 
         stats_to_share = []
-        
+
         for stats_info, stats in zip(self.stats_info, self.stats):
+            if stats_info.get("is_default"):
+                continue
             if stats_info['tokenizer_name'] == tokenizer_name and stats_info['embedder_name'] == embedder_name:
                 stats_to_share.append({
                     "A": [A.cpu() for A in stats["A"]],

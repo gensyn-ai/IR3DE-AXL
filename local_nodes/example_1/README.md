@@ -44,8 +44,8 @@ least-recently-used one is evicted from memory if memory runs low.
 
 | Node | Disk (all models used) | RAM: 1 model resident | RAM: all models resident |
 |------|------------------------|------------------------|---------------------------|
-| Node 00 (Horus) | ~24 GiB | ~9 GiB | ~31 GiB |
-| Node 01 (Seth)  | ~7.3 GiB | ~5 GiB | ~8 GiB |
+| Node 00 (Horus) | ~24 GB | ~9 GB | ~31 GB |
+| Node 01 (Seth)  | ~7.3 GB | ~5 GB | ~8 GB |
 
 Given that in this example both nodes run on the same machine, the requirements adds together. A CUDA GPU is used automatically if available, applying the same limits to VRAM instead of RAM.
 

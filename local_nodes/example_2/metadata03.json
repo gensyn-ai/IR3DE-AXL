@@ -1,0 +1,11 @@
+{
+  "node_id": "03",
+  "node_name": "Chiron",
+  "models": [
+    {
+      "hf_name": "MergeBench/Llama-3.2-3B_instruction",
+      "tags": ["instruction"],
+      "tokenizer": "unsloth/Llama-3.2-3B"
+    }
+  ]
+}

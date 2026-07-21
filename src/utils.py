@@ -683,7 +683,7 @@ def get_args():
     parser.add_argument("--max-answer-length", type=int, default=256,
                         help="Maximum number of new tokens an expert may "
                              "generate per answer.")
-    parser.add_argument("--answer-timeout", type=int, default=300,
+    parser.add_argument("--answer-timeout", type=int, default=3000,
                         help="Seconds to wait for an expert's answer (local generation or a "
                              "remote peer's reply) before giving up.")
     parser.add_argument( "--num-characters-conversation-history", type=int, default=1000,

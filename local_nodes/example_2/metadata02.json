@@ -1,0 +1,11 @@
+{
+  "node_id": "02",
+  "node_name": "Hermes",
+  "models": [
+    {
+      "hf_name": "MergeBench/Llama-3.2-3B_multilingual",
+      "tags": ["multilingual"],
+      "tokenizer": "unsloth/Llama-3.2-3B"
+    }
+  ]
+}

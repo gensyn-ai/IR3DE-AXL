@@ -1,0 +1,11 @@
+{
+  "node_id": "05",
+  "node_name": "Mnemosyne",
+  "models": [
+    {
+      "hf_name": "ambrosfitz/tinyllama-history-chat-v1.5",
+      "tags": ["history"],
+      "tokenizer": "ambrosfitz/tinyllama-history-chat-v1.5"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "node_id": "04",
+  "node_name": "Atlas",
+  "models": [
+    {
+      "hf_name": "benhaotang/llama3.2-1B-physics-finetuned",
+      "tags": ["physics"],
+      "tokenizer": "benhaotang/llama3.2-1B-physics-finetuned"
+    }
+  ]
+}
