@@ -1,0 +1,21 @@
+{
+  "node_id": "01",
+  "node_name": "Seth",
+  "models": [
+    {
+      "hf_name": "benhaotang/llama3.2-1B-physics-finetuned",
+      "tags": ["physics"],
+      "tokenizer": "benhaotang/llama3.2-1B-physics-finetuned"
+    },
+    {
+      "hf_name": "ambrosfitz/tinyllama-history-chat-v1.5",
+      "tags": ["history"],
+      "tokenizer": "ambrosfitz/tinyllama-history-chat-v1.5"
+    },
+    {
+      "hf_name": "amitbehura/philosophy-oracle-smollm2-360m",
+      "tags": ["philosophy"],
+      "tokenizer": "amitbehura/philosophy-oracle-smollm2-360m"
+    }
+  ]
+}

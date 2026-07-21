@@ -1512,9 +1512,12 @@ class IR3DEApp(App):
                     self._refresh_waiting_message()
 
     def _show_loading_models(self) -> None:
-        """Swap the animated loading message to 'Loading local models' once
-        the AXL backend has finished initializing."""
-        self._loading_label = "Loading local models"
+        """Swap the animated loading message to 'Fetching model info' once
+        the AXL backend has finished initializing. This is only the cheap
+        config/safetensors-header lookup (Peer.get_models_info) — the
+        expert models themselves are loaded lazily, on first actual use
+        (see model_worker.generate), not here."""
+        self._loading_label = "Fetching model info"
         msg = self.query_one("#loading-msg", Static)
         msg.update(self._loading_label + "." * self._loading_dots)
 

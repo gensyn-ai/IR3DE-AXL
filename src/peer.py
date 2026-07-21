@@ -232,17 +232,19 @@ class Peer:
         return topology
 
     def get_models_info(self):
-        """Load every model listed in this peer's metadata.json (via
-        model_worker, in the separate model_executor process) and collect
+        """Fetch cheap metadata (config + safetensors header, no weights)
+        for every model listed in this peer's metadata.json and collect
         their tags. Called once from __init__; feeds the Statistics tab's
-        local models table and the Control Panel's expertise sections."""
+        local models table and the Control Panel's expertise sections. The
+        weights themselves aren't downloaded/loaded until a model is first
+        actually used — see model_worker.generate."""
         models = []
         for i, model_info in enumerate(self.models_info):
             display_name = model_info.get("hf_name", "unknown")
-            log(f"Loading expert model from {display_name}", self.peer_id, msg_type=None)
+            log(f"Fetching info for expert model {display_name}", self.peer_id, msg_type=None)
 
             try:
-                meta = self.model_executor.submit(model_worker.load_model, i, model_info).result()
+                meta = self.model_executor.submit(model_worker.get_model_info, model_info).result()
             except ValueError as e:
                 raise ValueError(f"{e} Check the {self.metadata_path} file.") from e
 
@@ -254,7 +256,27 @@ class Peer:
             models.append({"tags": model_tags})
             model_info["size"] = meta["size"]
             model_info["type"] = meta["type"]
+            if meta["size"] <= 0:
+                log(f"Could not determine parameter count for {display_name} "
+                    f"(safetensors metadata fetch failed after retries); its size will "
+                    f"show as 0 and its memory estimate will fall back to a flat guess.",
+                    self.peer_id, msg_type="warning")
         return models
+
+    def _log_model_load_events(self, model_idx, loaded_now, evicted):
+        """Log a generate() call's lazy-load/eviction activity, in this
+        (the main) process — model_worker's own process has its
+        stdout/stderr silenced (see model_worker.init_worker), so it
+        reports what happened back through generate()'s return value
+        instead of logging it directly."""
+        if loaded_now:
+            hf_name = self.models_info[model_idx].get("hf_name", "unknown")
+            log(f"Loaded expert model {hf_name} into memory (first use since this node started).",
+                self.peer_id, msg_type=None)
+        for evicted_idx in evicted:
+            hf_name = self.models_info[evicted_idx].get("hf_name", "unknown")
+            log(f"Evicted expert model {hf_name} from memory to free up space.",
+                self.peer_id, msg_type=None)
 
     def get_stats_info(self):
         """Download (if needed) and load every stats entry in self.stats_info
@@ -479,9 +501,10 @@ class Peer:
                         log(f"From {sender[:8]}...: {message}", self.peer_id, msg_type="text")
 
                         model_idx = msg['selected_model'][1]
-                        future = self.model_executor.submit(model_worker.generate, model_idx, message, self.max_answer_length)
+                        future = self.model_executor.submit(model_worker.generate, model_idx, self.models_info[model_idx], message, self.max_answer_length)
                         try:
-                            answer, num_input_tokens, num_output_tokens = future.result(timeout=timeout)
+                            answer, num_input_tokens, num_output_tokens, loaded_now, evicted = future.result(timeout=timeout)
+                            self._log_model_load_events(model_idx, loaded_now, evicted)
                         except FuturesTimeoutError:
                             log(f"Generation timed out after {timeout}s for request from {sender[:8]}...", self.peer_id, msg_type="warning")
                             time.sleep(0.5)
@@ -1336,10 +1359,11 @@ class Peer:
 
             if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
 
-                future = self.model_executor.submit(model_worker.generate, selected_model[1], prompt, self.max_answer_length)
+                future = self.model_executor.submit(model_worker.generate, selected_model[1], self.models_info[selected_model[1]], prompt, self.max_answer_length)
 
                 try:
-                    answer, num_input_tokens, num_output_tokens = future.result(timeout=timeout)
+                    answer, num_input_tokens, num_output_tokens, loaded_now, evicted = future.result(timeout=timeout)
+                    self._log_model_load_events(selected_model[1], loaded_now, evicted)
                 except FuturesTimeoutError:
                     err = f"Generation timed out after {timeout}s."
                     log(err, self.peer_id, msg_type="warning")
@@ -1523,8 +1547,9 @@ class Peer:
         handler (when this peer is asked to summarize for a remote peer)."""
         max_tokens = max(20, min(self.max_answer_length, max_chars // 3 + 10))
         try:
-            future = self.model_executor.submit(model_worker.generate, model_idx, sum_prompt, max_tokens)
-            summary, _, _ = future.result(timeout=120)
+            future = self.model_executor.submit(model_worker.generate, model_idx, self.models_info[model_idx], sum_prompt, max_tokens)
+            summary, _, _, loaded_now, evicted = future.result(timeout=120)
+            self._log_model_load_events(model_idx, loaded_now, evicted)
         except Exception as e:
             log(f"Summarization failed: {e}", self.peer_id, msg_type="warning")
             return ""
@@ -1642,8 +1667,9 @@ class Peer:
             f"Title:"
         )
         try:
-            future = self.model_executor.submit(model_worker.generate, model_idx, title_prompt, 20)
-            title, _, _ = future.result(timeout=60)
+            future = self.model_executor.submit(model_worker.generate, model_idx, self.models_info[model_idx], title_prompt, 20)
+            title, _, _, loaded_now, evicted = future.result(timeout=60)
+            self._log_model_load_events(model_idx, loaded_now, evicted)
         except Exception as e:
             log(f"Title generation failed: {e}", self.peer_id, msg_type="warning")
             return ""
@@ -1682,7 +1708,6 @@ class Peer:
         if self.active_chat_id == chat_id:
             self.active_chat_id = next(iter(self.chats), None)
         return True
-
 
     @property
     def current_chat(self) -> dict | None:

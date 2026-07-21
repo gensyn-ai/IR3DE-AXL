@@ -72,7 +72,9 @@ def run_peer(app, args):
 
         def _on_axl_ready():
             """Peer's on_axl_ready callback: swap the loading message once
-            the AXL node subprocess is up, before models start loading."""
+            the AXL node subprocess is up, before Peer.get_models_info()
+            fetches each configured model's cheap metadata (not its weights
+            — those load lazily, on first actual use)."""
             if app is not None:
                 app.call_from_thread(app._show_loading_models)
 
