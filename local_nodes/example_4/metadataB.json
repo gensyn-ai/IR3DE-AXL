@@ -1,0 +1,15 @@
+{
+  "node_name": "Tezcatlipoca",
+  "models": [
+    {
+      "hf_name": "MergeBench/Llama-3.2-3B_multilingual",
+      "tags": ["multilingual"],
+      "tokenizer": "unsloth/Llama-3.2-3B"
+    },
+    {
+      "hf_name": "ambrosfitz/tinyllama-history-chat-v1.5",
+      "tags": ["history"],
+      "tokenizer": "ambrosfitz/tinyllama-history-chat-v1.5"
+    }
+  ]
+}
