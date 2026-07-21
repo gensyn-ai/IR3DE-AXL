@@ -1,6 +1,29 @@
 # IR3DE-AXL
 
-# Installation
+[![arXiv](https://img.shields.io/badge/arXiv-2606.06098-b31b1b.svg)](https://arxiv.org/pdf/2606.06098)
+[![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/release/python-3100/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+![IR3DE-AXL](assets/teaser.png)
+
+This repository implements a decentralized, multi-agent chat system: every
+peer is a node on [Gensyn's AXL](https://github.com/gensyn-ai/axl) P2P
+network, each hosting one or more domain-expert LLMs (coding, math,
+physics, ...), using **IR3DE** to decide, for every message across the
+whole network, which expert is best suited to answer it.
+
+[IR3DE](https://arxiv.org/pdf/2606.06098) is a lightweight, inference router that automatically selects the best domain expert for any given prompt. Rather than training a model to pick an expert, each expert is represented by a small ridge-regression fit (an `A`/`b` matrix pair) over its domain's own token embeddings. To route a message, its tokens are embedded, scored against every candidate tag's regression, filtered by entropy (uncertain tokens are dropped), and the remaining tokens "vote" for the tag whose expert should answer. Adding or removing an expert just means adding or removing its regression stats — never
+retraining the router itself. See the [paper](https://arxiv.org/pdf/2606.06098), the [official IR3DE code](https://github.com/gensyn-ai/IR3DE), and the
+[blog post](https://blog.gensyn.ai/look-beyond-one-size-fits-all-llms-with-ir3de/)
+for the full research behind the router.
+
+**This repository is built directly on top of that work**, adding the AXL P2P transport layer, a Textual-based multi-chat TUI, and the lazy-loading expert-serving infrastructure needed to run a live network of these experts, rather than an offline benchmark.
+
+## Installation
+
+**Prerequisites:**
+- **Go 1.25.5+** — needed to build the AXL node binary. The build pins `GOTOOLCHAIN=go1.25.5`, so any reasonably recent Go install works — it fetches the exact toolchain version itself. Get it from [go.dev/dl](https://go.dev/dl/).
+- **OpenSSL with Ed25519 support** — used to generate each node's private key. macOS ships LibreSSL by default, which does *not* support Ed25519. Install real OpenSSL first (`brew install openssl`).
 
 1) Download and build axl within this repository:
 
@@ -11,11 +34,13 @@ go build -o node ./cmd/node/
 cd ..
 ```
 
-2) Generate any desired number of nodes:
+2) Set up one or more local nodes. Either generate custom ones:
 
 ```
 ./scripts/add_local_node.sh [NUM-PEERS]
 ```
+
+or use one of the four ready-made setups in [Examples](#examples) below.
 
 3) Install the Python dependencies (pick one):
 
@@ -59,5 +84,35 @@ for your CUDA version before reinstalling the rest of `requirements.txt`.
 4) Run the simulation:
 
 ```
-python run.py --peer-id [PEER_ID]
+python run.py [--peer-id PEER_ID]
+```
+
+`--peer-id` is only needed when running more than one simulated local peer
+at once (see step 2); omit it to run the single default local peer.
+
+## Examples
+
+Four ready-made setups live in `local_nodes/`, each self-contained with its
+own `setup.sh` and README:
+
+| Example | Nodes | Topology | What it shows |
+|---------|-------|----------|----------------|
+| [example_1](local_nodes/example_1/README.md) | 2, local | asymmetric pair | Two nodes with disjoint experts covering 7 domains between them. |
+| [example_2](local_nodes/example_2/README.md) | 7, local | star | One model per node in a star topology, showing how visibility propagates outward from a hub. |
+| [example_3](local_nodes/example_3/README.md) | 8, local | random | A denser, randomly generated (but reproducible) network with one or more experts per each domain. Each node serves different IR3DE stats. |
+| [example_4](local_nodes/example_4/README.md) | 3, remote | cycle | Runs across three separate physical machines instead of simulating multiple peers on one; requires real, reachable IP addresses between nodes. |
+
+Each example's `setup.sh` installs its config/metadata into `local_nodes/`; see each README for exact usage and resource requirements, then run each node with `python run.py [--peer-id NN]` as instructed there.
+
+## Extracting IR3DE stats (optional)
+
+Every IR3DE stats file this repo uses is already computed and published on Hugging Face ([`Erosinho/IR3DE-stats`](https://huggingface.co/Erosinho/IR3DE-stats)), and `peer.py` downloads whichever ones it needs automatically at runtime. Therefore, **you do not need to run anything in this section to use this repo.**
+
+`src/extract_ir3de_stats.py` is kept as a worked example of how those stats were produced, in case you want to add IR3DE support for a new dataset, tokenizer, or embedding layer. The reasoning-benchmark datasets (`gsm8k`, `m_arc`, `humaneval`, `ifeval`) are automatically downloaded via `lm-eval-harness`; the CLM/M2D2 domain datasets (`cs_l1`, `math_l1`,
+`physics_l1`, `History_and_events`, `Philosophy_and_thinking`) need to be
+downloaded and prepared by hand first, following the instructions in
+[gensyn-ai/dume's dataset README](https://github.com/gensyn-ai/dume/blob/main/dataset/README.md).
+
+```
+python src/extract_ir3de_stats.py --dataset DATASET [--tok-type {mistral,llama}] [options]
 ```
