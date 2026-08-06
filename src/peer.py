@@ -41,7 +41,8 @@ import chats
 import model_worker
 from utils import (deserialize_chunk_header, deserialize_safe, ensure_stats_file,
                     format_prompt_for_expert, ipv6_from_pubkey, load_embedder_only, log,
-                    MAX_TITLE_CHARS, serialize_safe, SUMMARY_SYSTEM_PROMPT, TITLE_SYSTEM_PROMPT)
+                    MAX_TITLE_CHARS, messages_for_expert, serialize_safe,
+                    SUMMARY_SYSTEM_PROMPT, TITLE_SYSTEM_PROMPT)
 
 
 AXL = "http://127.0.0.1:91"
@@ -506,9 +507,21 @@ class Peer:
 
                         message = msg.get('message')
                         log(f"From {sender[:8]}...: {message}", self.peer_id, msg_type="text")
+                        structured_messages = msg.get("messages")
+                        if not (
+                            isinstance(structured_messages, list)
+                            and all(
+                                isinstance(item, dict)
+                                and isinstance(item.get("role"), str)
+                                and isinstance(item.get("content"), str)
+                                for item in structured_messages
+                            )
+                        ):
+                            structured_messages = None
+                        generation_input = structured_messages or message
 
                         model_idx = msg['selected_model'][1]
-                        future = self.model_executor.submit(model_worker.generate, model_idx, self.models_info[model_idx], message, self.max_answer_length)
+                        future = self.model_executor.submit(model_worker.generate, model_idx, self.models_info[model_idx], generation_input, self.max_answer_length)
                         try:
                             answer, num_input_tokens, num_output_tokens, loaded_now, evicted = future.result(timeout=timeout)
                             self._log_model_load_events(model_idx, loaded_now, evicted)
@@ -522,13 +535,13 @@ class Peer:
                             continue
                         log(f"To {sender[:8]}...: {answer}", self.peer_id, msg_type="text")
 
-                        # If the requester asked for a title, generate one with the same expert
-                        # that just answered. The user's text is the last 'User:' block of the
-                        # received prompt; for the first turn that's the only one.
+                        # If requested, generate a title with the same expert.
+                        # New peers send the current user text explicitly; retain
+                        # prompt parsing for backward compatibility.
                         title = ""
                         if msg.get("request_title"):
-                            user_text = ""
-                            if isinstance(message, str):
+                            user_text = msg.get("current_user_message", "")
+                            if not user_text and isinstance(message, str):
                                 # Take everything after the last "User:" up to the next "Agent:"
                                 # (works because we always end the prompt with "Agent: ").
                                 after_user = message.rsplit("User:", 1)
@@ -1372,10 +1385,11 @@ class Peer:
         resolved_later = False
         try:
             prompt = format_prompt_for_expert(chat)
+            structured_messages = messages_for_expert(chat)
 
             if ipv6_from_pubkey(selected_model[0]) == ipv6_from_pubkey(self.public_key):
 
-                future = self.model_executor.submit(model_worker.generate, selected_model[1], self.models_info[selected_model[1]], prompt, self.max_answer_length)
+                future = self.model_executor.submit(model_worker.generate, selected_model[1], self.models_info[selected_model[1]], structured_messages, self.max_answer_length)
 
                 try:
                     answer, num_input_tokens, num_output_tokens, loaded_now, evicted = future.result(timeout=timeout)
@@ -1448,6 +1462,12 @@ class Peer:
                 "assigned_tag":   assigned_tag,
                 "selected_model": selected_model,
                 "message":        prompt,
+                "messages":       structured_messages,
+                "current_user_message": next(
+                    (item["content"] for item in reversed(structured_messages)
+                     if item["role"] == "user"),
+                    "",
+                ),
                 "request_title":  chat.get("title") is None,
             }
             sent = self.send(msg, selected_model[0], timeout=timeout)

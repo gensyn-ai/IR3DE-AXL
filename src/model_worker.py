@@ -20,9 +20,11 @@ from collections import OrderedDict
 
 import psutil
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
+                          StopStringCriteria, StoppingCriteriaList)
 
 _MODELS: "OrderedDict[int, dict]" = OrderedDict()
+_NEXT_TURN_MARKERS = ("\nUser:", "\nAgent:", "\nAssistant:")
 
 # Always leave at least this much free memory for the OS and everything
 # else running, on top of whatever the model being loaded needs.
@@ -116,6 +118,73 @@ def _evict_lru_until_it_fits(needed_bytes: int) -> list[int]:
     return evicted
 
 
+def _model_chat_template(model_info: dict, tokenizer):
+    """Resolve a template without changing the configured tokenizer.
+
+    Prefer the configured tokenizer's template. If it has none, read only the
+    template metadata from the model repository, which lets heterogeneous
+    experts supply their own format without model-family conditionals.
+    """
+    template = getattr(tokenizer, "chat_template", None)
+    if template:
+        return template
+    if model_info["hf_name"] == model_info["tokenizer"]:
+        return None
+    try:
+        model_tokenizer = AutoTokenizer.from_pretrained(model_info["hf_name"])
+    except Exception:
+        return None
+    return getattr(model_tokenizer, "chat_template", None)
+
+
+def _plain_text_messages(messages: list[dict[str, str]]) -> str:
+    """Fallback serialization for experts that publish no chat template."""
+    labels = {"system": "System", "user": "User", "assistant": "Agent"}
+    parts = [
+        f"{labels.get(message['role'], message['role'].title())}: "
+        f"{message['content']}"
+        for message in messages
+    ]
+    parts.append("Agent: ")
+    return "\n".join(parts)
+
+
+def _encode_generation_input(model_utils: dict, message, device):
+    tokenizer = model_utils["tokenizer"]
+    if isinstance(message, list) and model_utils.get("chat_template"):
+        try:
+            input_ids = tokenizer.apply_chat_template(
+                message,
+                chat_template=model_utils["chat_template"],
+                add_generation_prompt=True,
+                tokenize=True,
+                return_tensors="pt",
+            )
+            if input_ids.ndim == 1:
+                input_ids = input_ids.unsqueeze(0)
+            input_ids = input_ids.to(device)
+            return {
+                "input_ids": input_ids,
+                "attention_mask": torch.ones_like(input_ids),
+            }
+        except Exception:
+            # A third-party template may be incompatible with the configured
+            # tokenizer. Preserve service by falling back to plain text.
+            pass
+
+    text = _plain_text_messages(message) if isinstance(message, list) else message
+    return tokenizer(text, return_tensors="pt").to(device)
+
+
+def _trim_next_turn(answer: str) -> str:
+    positions = [
+        answer.find(marker)
+        for marker in _NEXT_TURN_MARKERS
+        if marker in answer
+    ]
+    return answer[:min(positions)].rstrip() if positions else answer.strip()
+
+
 def _ensure_loaded(model_idx: int, model_info: dict) -> tuple[bool, list[int]]:
     """Load model_idx into _MODELS if it isn't resident yet — evicting the
     least-recently-used resident model(s) first if memory is tight — and
@@ -133,11 +202,23 @@ def _ensure_loaded(model_idx: int, model_info: dict) -> tuple[bool, list[int]]:
     model = AutoModelForCausalLM.from_pretrained(model_info["hf_name"], dtype=torch.bfloat16)
     model.to(device)  # type: ignore
     tokenizer = AutoTokenizer.from_pretrained(model_info["tokenizer"])
-    _MODELS[model_idx] = {"model": model, "tokenizer": tokenizer}
+    chat_template = _model_chat_template(model_info, tokenizer)
+    try:
+        stopping_criteria = StoppingCriteriaList([
+            StopStringCriteria(tokenizer, list(_NEXT_TURN_MARKERS))
+        ])
+    except Exception:
+        stopping_criteria = None
+    _MODELS[model_idx] = {
+        "model": model,
+        "tokenizer": tokenizer,
+        "chat_template": chat_template,
+        "stopping_criteria": stopping_criteria,
+    }
     return True, evicted
 
 
-def generate(model_idx: int, model_info: dict, message: str, max_new_tokens: int) -> tuple[str, int, int, bool, list[int]]:
+def generate(model_idx: int, model_info: dict, message: str | list[dict[str, str]], max_new_tokens: int) -> tuple[str, int, int, bool, list[int]]:
     """Generate a reply from model_idx, loading it first if it isn't
     already resident (see _ensure_loaded). Returns (answer,
     num_input_tokens, num_output_tokens, loaded_now, evicted_indices) —
@@ -149,11 +230,20 @@ def generate(model_idx: int, model_info: dict, message: str, max_new_tokens: int
     loaded_now, evicted = _ensure_loaded(model_idx, model_info)
     model_utils = _MODELS[model_idx]
     device = _device()
-    encoding = model_utils['tokenizer'](message, return_tensors='pt').to(device)
+    encoding = _encode_generation_input(model_utils, message, device)
     input_ids = encoding['input_ids']
     num_input_tokens = int(input_ids.shape[1])
-    out = model_utils['model'].generate(input_ids=input_ids, max_new_tokens=max_new_tokens)
+    generation_kwargs = {
+        "input_ids": input_ids,
+        "attention_mask": encoding.get("attention_mask"),
+        "max_new_tokens": max_new_tokens,
+    }
+    if model_utils["stopping_criteria"] is not None:
+        generation_kwargs["stopping_criteria"] = model_utils["stopping_criteria"]
+    out = model_utils['model'].generate(**generation_kwargs)
     new_tokens = out[0, num_input_tokens:]
-    answer = model_utils['tokenizer'].decode(new_tokens, skip_special_tokens=True)
+    answer = _trim_next_turn(
+        model_utils['tokenizer'].decode(new_tokens, skip_special_tokens=True)
+    )
     num_output_tokens = int(new_tokens.shape[0])
     return answer, num_input_tokens, num_output_tokens, loaded_now, evicted

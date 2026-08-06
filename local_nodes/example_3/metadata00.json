@@ -3,7 +3,7 @@
   "node_name": "Odin",
   "models": [
     {
-      "hf_name": "MergeBench/Llama-3.2-3B_coding",
+      "hf_name": "MergeBench/Llama-3.2-3B-Instruct_coding",
       "tags": ["coding"],
       "tokenizer": "unsloth/Llama-3.2-3B"
     }

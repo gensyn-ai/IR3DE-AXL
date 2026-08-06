@@ -127,6 +127,26 @@ FilterChip, ActionChip {
     color: #888888;
 }
 
+#copy-response-row {
+    width: 100%;
+    height: 1;
+    align: right middle;
+}
+
+#copy-response-button {
+    width: 17;
+    height: 1;
+    padding: 0 1;
+    color: #ffffff;
+    background: #555555;
+    content-align: center middle;
+}
+
+#copy-response-button:hover {
+    background: #888888;
+    color: #000000;
+}
+
 TabbedContent {
     height: 1fr;
 }

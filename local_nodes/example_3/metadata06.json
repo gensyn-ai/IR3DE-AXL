@@ -3,12 +3,12 @@
   "node_name": "Tyr",
   "models": [
     {
-      "hf_name": "MergeBench/Llama-3.2-3B_math",
+      "hf_name": "MergeBench/Llama-3.2-3B-Instruct_math",
       "tags": ["math"],
       "tokenizer": "unsloth/Llama-3.2-3B"
     },
     {
-      "hf_name": "MergeBench/Llama-3.2-3B_instruction",
+      "hf_name": "MergeBench/Llama-3.2-3B-Instruct_instruction",
       "tags": ["instruction"],
       "tokenizer": "unsloth/Llama-3.2-3B"
     },

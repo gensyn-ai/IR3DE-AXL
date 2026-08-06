@@ -159,6 +159,8 @@ class IR3DEApp(App):
                     with TabPane("...", id="tab-chat-placeholder"):
                         yield Static(DIAMOND_FRAMES[0], id="right-spinner")
                 yield Static("Initializing AXL backend", id="loading-msg")
+                with Horizontal(id="copy-response-row"):
+                    yield Static("[COPY RESPONSE]", id="copy-response-button", markup=False)
                 yield Static("", id="input-divider")
                 with Horizontal(id="input-row"):
                     yield Static("> ", id="prompt")
@@ -542,9 +544,7 @@ class IR3DEApp(App):
             self.query_one(wid, Static).update(bar)
 
     def on_click(self, event):
-        """App-wide click router: the filter toggle, [SEND], the latency
-        metric picker, [+]/☰, and (via the ancestor scan below) a chat tab's
-        × close zone or double-click-to-rename."""
+        """Route clicks for controls and chat-tab actions."""
         if event.control is None:
             return
         if event.control.id == "filter-toggle":
@@ -555,6 +555,8 @@ class IR3DEApp(App):
             if event.control.disabled:
                 return
             self.query_one("#user-input", SubmittableTextArea).submit()
+        elif event.control.id == "copy-response-button":
+            self._copy_latest_response()
         elif event.control.id == "latency-metric-button":
             self.push_screen(LatencyMetricSelectScreen(), self._on_latency_metric_chosen)
         elif event.control.id == "new-chat-button":
@@ -582,6 +584,33 @@ class IR3DEApp(App):
                     self._open_chat_rename_dialog()
                     event.stop()
                     return
+
+    def _copy_latest_response(self) -> None:
+        """Copy the active chat's most recent successful agent response."""
+        if self.peer is None or self.peer.active_chat_id is None:
+            self.notify("No active chat to copy from", severity="warning")
+            return
+
+        chat = self.peer.chats.get(self.peer.active_chat_id)
+        if chat is None:
+            self.notify("No active chat to copy from", severity="warning")
+            return
+
+        response = next(
+            (
+                message.get("text", "")
+                for message in reversed(chat.get("messages", []))
+                if message.get("role") == "agent"
+                and message.get("status", "ok") == "ok"
+            ),
+            "",
+        )
+        if not response:
+            self.notify("No response to copy", severity="warning")
+            return
+
+        self.copy_to_clipboard(response)
+        self.notify("Latest response copied")
 
     def _toggle_drawer(self):
         """Show/hide the Logs tab's filter-chip drawer. Called from on_click

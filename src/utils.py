@@ -131,7 +131,14 @@ AGENT_SYSTEM_PROMPT = (
     "Important:\n"
     "- Previous agent messages are context, not guaranteed truth.\n"
     "- The user's messages define the actual request.\n"
-    "- Do not assume hidden information outside the transcript."
+    "- Do not assume hidden information outside the transcript.\n\n"
+    "Output rules:\n"
+    "- Return only your answer.\n"
+    "- Produce exactly one response.\n"
+    "- Do not simulate future conversation turns.\n"
+    "- Do not repeat the user's question.\n"
+    "- Do not repeat your answer.\n"
+    "- End immediately after the answer.\n"
 )
 
 
@@ -150,23 +157,26 @@ TITLE_SYSTEM_PROMPT = (
     "Output ONLY the title text — no preamble, no explanation."
 )
 
-def format_prompt_for_expert(chat: dict) -> str:
-    """Build the text prompt sent to the expert from the chat's sendable
-    history. Plain 'User:' / 'Agent:' role markers — model-agnostic. The
-    trailing 'Agent: ' primes the model to continue.
-
-    Note: we deliberately do *not* use tokenizer chat templates here because
-    different experts in the network use different tokenizers. Plain text
-    works on all of them; quality is marginally below template-formatted
-    chat but uniform across the network.
-    """
-    parts = [AGENT_SYSTEM_PROMPT, ""]
+def messages_for_expert(chat: dict) -> list[dict[str, str]]:
+    """Return model-agnostic role/content messages for an expert."""
+    system_content = AGENT_SYSTEM_PROMPT
     if chat.get("summary"):
-        parts.append("Summary of the chat: " + chat["summary"])
-        parts.append("")
+        system_content += "\n\nSummary of the chat:\n" + chat["summary"]
+
+    messages = [{"role": "system", "content": system_content}]
     for m in chats.history_for_expert(chat):
-        prefix = "User" if m["role"] == "user" else "Agent"
-        parts.append(f"{prefix}: {m['text']}")
+        role = "user" if m["role"] == "user" else "assistant"
+        messages.append({"role": role, "content": m["text"]})
+    return messages
+
+
+def format_prompt_for_expert(chat: dict) -> str:
+    """Build a plain-text fallback for peers that predate structured prompts."""
+    messages = messages_for_expert(chat)
+    parts = [messages[0]["content"], ""]
+    for message in messages[1:]:
+        prefix = "User" if message["role"] == "user" else "Agent"
+        parts.append(f"{prefix}: {message['content']}")
     parts.append("Agent: ")
     return "\n".join(parts)
 
