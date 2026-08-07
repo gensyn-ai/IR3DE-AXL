@@ -27,7 +27,7 @@ from rich.text import Text as RichText
 from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import DataTable, RichLog, Static, TabbedContent, TabPane, TextArea
+from textual.widgets import DataTable, Log, RichLog, Static, TabbedContent, TabPane, TextArea
 from textual.widgets._tabbed_content import ContentTabs
 from textual.widgets._tabs import Tab
 from textual_plotext import PlotextPlot
@@ -1499,7 +1499,7 @@ class IR3DEApp(App):
         tabs_scroll.styles.width = max(0, tabs_bar.size.width - button_pair.outer_size.width)
 
     def _mount_chat_tab(self, chat_id: str, chat: dict):
-        """Mount a chat's TabPane and its RichLog. Returns the AwaitComplete
+        """Mount a chat's TabPane and its selectable Log. Returns the AwaitComplete
         from TabbedContent.add_pane so async callers can await pane
         registration before referencing it (e.g. before setting
         TabbedContent.active). Sync callers can ignore the return value."""
@@ -1517,7 +1517,8 @@ class IR3DEApp(App):
             placeholder.styles.display = "none"
         pane.mount(placeholder)
 
-        output = RichLog(id=f"output-{chat_id}", classes="chat-output", highlight=False, markup=False, auto_scroll=True, wrap=True)
+        # Log (not RichLog): Textual supports mouse text selection on Log only.
+        output = Log(id=f"output-{chat_id}", classes="chat-output", auto_scroll=True)
         pane.mount(output)
         set_output_widget(chat_id, output)
         render_chat_history_into(chat, output)
