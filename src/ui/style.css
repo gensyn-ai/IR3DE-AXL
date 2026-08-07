@@ -138,12 +138,12 @@ FilterChip, ActionChip {
     height: 1;
     padding: 0 1;
     color: #ffffff;
-    background: #555555;
+    background: #237dfa;
     content-align: center middle;
 }
 
 #copy-response-button:hover {
-    background: #888888;
+    background: #23c1fa;
     color: #000000;
 }
 

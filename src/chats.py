@@ -16,7 +16,7 @@ A chat is a plain dict matching this shape:
       "messages":            [
       
         {
-          "role":   "user" | "agent",
+          "role":   "user" | "router" | "agent",
           "text":   str,
           "ts":     str,                              # ISO 8601 UTC
           "status": "ok" | "failed",                  # 'failed' only on user role
@@ -24,6 +24,7 @@ A chat is a plain dict matching this shape:
             "peer_pk":   str,
             "model_idx": int,
             "tag":       str | None,
+            "peer_name": str | None,                  # display label in chat transcript
           } | None,
         },
         ...
@@ -99,12 +100,26 @@ def add_user_message(chat: dict, text: str) -> dict:
     return msg
 
 
+def add_router_message(chat: dict, text: str) -> dict:
+    """Append a display-only router selection line (not sent to experts)."""
+    msg = {
+        "role":   "router",
+        "text":   text,
+        "ts":     _now_iso(),
+        "status": "ok",
+    }
+    chat["messages"].append(msg)
+    chat["updated_at"] = _now_iso()
+    return msg
+
+
 def add_agent_message(
     chat: dict,
     text: str,
     peer_pk: str,
     model_idx: int,
     tag: str | None = None,
+    peer_name: str | None = None,
 ) -> dict:
     """Append an agent message tied to the expert that produced it."""
     msg = {
@@ -116,6 +131,7 @@ def add_agent_message(
             "peer_pk":   peer_pk,
             "model_idx": model_idx,
             "tag":       tag,
+            "peer_name": peer_name,
         },
     }
     chat["messages"].append(msg)
@@ -163,11 +179,14 @@ def trim_oldest_pair(chat: dict) -> tuple[dict, dict] | None:
     start = chat.get("history_start_index", 0)
     i = start
     while i < len(msgs) - 1:
-        if (msgs[i]["role"] == "user" and msgs[i].get("status", "ok") == "ok"
-                and msgs[i + 1]["role"] == "agent"):
-            chat["history_start_index"] = i + 2
-            chat["updated_at"] = _now_iso()
-            return msgs[i], msgs[i + 1]
+        if msgs[i]["role"] == "user" and msgs[i].get("status", "ok") == "ok":
+            j = i + 1
+            while j < len(msgs) and msgs[j]["role"] == "router":
+                j += 1
+            if j < len(msgs) and msgs[j]["role"] == "agent":
+                chat["history_start_index"] = j + 1
+                chat["updated_at"] = _now_iso()
+                return msgs[i], msgs[j]
         i += 1
     return None
 
@@ -176,12 +195,15 @@ def trim_oldest_pair(chat: dict) -> tuple[dict, dict] | None:
 
 def history_for_expert(chat: dict) -> list[dict]:
     """The slice of messages sent to the expert on the next turn: all 'ok'
-    messages from history_start_index onward. Earlier turns are folded into
-    chat['summary']; failed user turns anywhere in the live slice are
-    excluded so the transcript has no gaps."""
+    user/agent messages from history_start_index onward. Earlier turns are
+    folded into chat['summary']; failed user turns and display-only router
+    lines are excluded so the transcript has no gaps."""
     msgs = chat["messages"]
     start = chat.get("history_start_index", 0)
-    return [m for m in msgs[start:] if m.get("status", "ok") == "ok"]
+    return [
+        m for m in msgs[start:]
+        if m.get("status", "ok") == "ok" and m["role"] in ("user", "agent")
+    ]
 
 
 def history_char_count(chat: dict) -> int:

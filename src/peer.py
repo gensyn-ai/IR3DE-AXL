@@ -573,7 +573,13 @@ class Peer:
                         orig = msg.get("orig_msg_id")
                         pending = self.awaiting_acks.pop(orig, None) if orig else None
                         chat_id_for_log = pending.get("chat_id") if pending else None
-                        log(f"{msg.get('message')}", msg.get("peer_id"), msg_type="text", right=True, chat_id=chat_id_for_log)
+                        log(
+                            f"{msg.get('message')}",
+                            msg.get("peer_name") or msg.get("peer_id"),
+                            msg_type="text",
+                            right=True,
+                            chat_id=chat_id_for_log,
+                        )
 
                         if pending is not None:
                             log(f"Removing message ID {orig[:8]}... from awaiting ACKs.", self.peer_id, msg_type="ir3de-ack")
@@ -618,6 +624,7 @@ class Peer:
                                     peer_pk=sel[0],
                                     model_idx=sel[1],
                                     tag=pending.get("tag"),
+                                    peer_name=msg.get("peer_name") or info.get("peer_name"),
                                 )
                                 title = msg.get("title")
                                 if title and chat.get("title") is None:
@@ -678,6 +685,10 @@ class Peer:
                             self.known_public_keys[sender] = {}
                             self.known_public_keys[sender]["peer_id"] = msg.get("peer_id")
                             self.known_public_keys[sender]["peer_name"] = msg.get("peer_name")
+                        elif sender in self.known_public_keys and msg.get("peer_name"):
+                            # Refresh name if this peer was first learned via knowledge
+                            # gossip (which previously dropped peer_name).
+                            self.known_public_keys[sender]["peer_name"] = msg.get("peer_name")
 
                         if msg.get("type") == "greeting":
                             log(f"Sending greeting back to Node {msg.get('peer_id')}...", self.peer_id, msg_type="greeting-ack")
@@ -710,7 +721,10 @@ class Peer:
                         for pk, info in msg.get("known_peers", {}).items():
                             peer_id = info.get("peer_id")
                             if pk not in self.known_public_keys and ipv6_from_pubkey(pk) != ipv6_from_pubkey(self.public_key):
-                                self.new_peer_discovered({"peer_id": peer_id}, pk)
+                                self.new_peer_discovered(
+                                    {"peer_id": peer_id, "peer_name": info.get("peer_name")},
+                                    pk,
+                                )
                                 new_peers += 1
                     
                         log(f"Updated known peers with knowledge from Node {msg.get('peer_id')}. New peers added: {new_peers}. Total known peers: {len(self.known_public_keys)}.", self.peer_id, msg_type="knowledge")
@@ -1270,6 +1284,34 @@ class Peer:
         waiting indicator."""
         return self.pending_answers.get(chat_id, 0) > 0
 
+    def _log_router_selection(self, chat, chat_id, selected_model, assigned_tag) -> None:
+        """Persist and display a [ROUTER] line naming the chosen model/node/domain."""
+        peer_pk, model_idx = selected_model
+        domain = assigned_tag if assigned_tag and assigned_tag != "(unrouted)" else "selected"
+
+        if peer_pk == self.public_key:
+            node_name = self.node_name
+            model_name = (
+                self.models_info[model_idx].get("hf_name")
+                if 0 <= model_idx < len(self.models_info)
+                else None
+            )
+        else:
+            info = self.known_public_keys.get(peer_pk) or {}
+            node_name = info.get("peer_name") or f"Node {info.get('peer_id', peer_pk[:8])}"
+            models_info = info.get("models_info") or []
+            model_name = None
+            if 0 <= model_idx < len(models_info):
+                mi = models_info[model_idx]
+                model_name = mi.get("name") or mi.get("hf_name")
+
+        if not model_name:
+            model_name = f"model:{model_idx}"
+
+        text = f"{model_name} from {node_name} is selected for '{domain}'"
+        chats.add_router_message(chat, text)
+        log(text, node_id="ROUTER", msg_type=None, right=True, chat_id=chat_id)
+
     def handle_user_input(self, user_input, timeout=60):
         """Route a submitted message to an expert (skipping routing if only
         one model is selected overall) and dispatch it, deferring to a
@@ -1300,7 +1342,6 @@ class Peer:
             selected_model = next(iter(unique_models))
             msg = "Only one model is currently selected across all tags. Skipping token routing and dispatching directly to it."
             log(msg, self.peer_id, msg_type="warning")
-            log(msg, self.peer_id, msg_type="warning", right=True, chat_id=chat_id)
 
             peer_pk, model_idx = selected_model
             if peer_pk == self.public_key:
@@ -1340,6 +1381,7 @@ class Peer:
 
         tag_for_msg = assigned_tag if assigned_tag and assigned_tag != "(unrouted)" else None
         chats.add_user_message(chat, user_input)
+        self._log_router_selection(chat, chat_id, selected_model, assigned_tag)
 
         needs_remote_summary = self._ensure_within_budget(chat_id, selected_model)
 
@@ -1408,7 +1450,7 @@ class Peer:
                     return
 
                 log(f"Answer processed locally.", self.peer_id, msg_type="text")
-                log(f"{answer}", self.peer_id, msg_type="text", right=True, chat_id=chat_id)
+                log(f"{answer}", self.node_name, msg_type="text", right=True, chat_id=chat_id)
 
                 prompt_latency = time.time() - start_time
                 num_total_tokens = num_input_tokens + num_output_tokens
@@ -1438,6 +1480,7 @@ class Peer:
                     peer_pk=self.public_key,
                     model_idx=selected_model[1],
                     tag=tag_for_msg,
+                    peer_name=self.node_name,
                 )
 
                 if chat.get("title") is None:

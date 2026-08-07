@@ -226,7 +226,12 @@ def log(message, node_id, msg_type=None, msg_id=None, right=False, chat_id=None)
     if ACTIVATE_UI:
 
         msg_id_str = f" [{msg_id[:8]}]" if msg_id is not None else ""
-        node_prefix = f"[NODE {node_id}] " if node_id != 'USER' else "[USER] "
+        if node_id == "USER":
+            node_prefix = "[USER] "
+        elif node_id == "ROUTER":
+            node_prefix = "[ROUTER] "
+        else:
+            node_prefix = f"[NODE {node_id}] "
         time_prefix = f"[{current_time}] "
 
         line = Text()
@@ -263,11 +268,17 @@ def log(message, node_id, msg_type=None, msg_id=None, right=False, chat_id=None)
             print(line.plain)
     else:
         msg_id_str = f" [{msg_id[:8]}]" if msg_id is not None else ""
+        if node_id == "USER":
+            prefix = "[USER]"
+        elif node_id == "ROUTER":
+            prefix = "[ROUTER]"
+        else:
+            prefix = f"[NODE {node_id}]"
         if msg_type is None:
-            print(f"[NODE {node_id}] [{current_time}]{msg_id_str} {message}")
+            print(f"{prefix} [{current_time}]{msg_id_str} {message}")
         else:
             color = MSG_TYPE_COLORS.get(msg_type, "white")
-            print(f"[NODE {node_id}] [{current_time}] {colored(f'[{msg_type.upper()}]', hex_to_rgb(color))}{msg_id_str} {message}")
+            print(f"{prefix} [{current_time}] {colored(f'[{msg_type.upper()}]', hex_to_rgb(color))}{msg_id_str} {message}")
     
 
 def ipv6_from_pubkey(pubkey_hex: str) -> str:
@@ -618,10 +629,18 @@ def render_chat_history_into(chat: dict, widget) -> None:
         time_part = ts.split("T", 1)[1][:8] if "T" in ts else ""
         if m["role"] == "user":
             node_label = "[USER]"
+        elif m["role"] == "router":
+            node_label = "[ROUTER]"
         else:
             expert = m.get("expert") or {}
             pk = expert.get("peer_pk", "") or ""
-            node_label = f"[NODE {pk[:8]}]" if pk else "[AGENT]"
+            name = expert.get("peer_name") or ""
+            if name:
+                node_label = f"[NODE {name}]"
+            elif pk:
+                node_label = f"[NODE {pk[:8]}]"
+            else:
+                node_label = "[AGENT]"
         line = Text()
         line.append(f"{node_label} ", style="bold dim white")
         line.append(f"[{time_part}] ", style="dim white")

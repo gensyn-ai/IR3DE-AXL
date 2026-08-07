@@ -21,6 +21,7 @@ class ExpertiseSection(Vertical):
         self._candidates = candidates
         self._selected = selected
         self._rows_container = Vertical(classes="expertise-section-rows")
+        self._badge = Static("[SELECTED]", classes="expertise-section-badge")
 
     def compose(self) -> ComposeResult:
         """Lay out the header (tag name + [SELECTED] badge), description,
@@ -28,13 +29,27 @@ class ExpertiseSection(Vertical):
         with Horizontal(classes="expertise-section-header"):
             yield Static(f"{self._symbol.ljust(3)} {self._tag.capitalize()}",
                          classes="expertise-section-title")
-            yield Static("[SELECTED]", classes="expertise-section-badge")
+            yield self._badge
         yield Static(f"Select the desired model for {self._tag} tasks.",
                      classes="expertise-section-desc")
         yield self._rows_container
 
     def on_mount(self) -> None:
-        """Populate rows once _rows_container is actually in the DOM."""
+        """Populate rows after children from compose() are attached.
+
+        Parent on_mount runs before yielded children are mounted, so mounting
+        into _rows_container here would raise MountError — defer one refresh.
+        """
+        self.call_after_refresh(self._populate)
+
+    def _populate(self) -> None:
+        """Fill model rows and badge once the section is fully in the DOM."""
+        if not self.is_attached:
+            return
+        if not self._rows_container.is_attached or not self._badge.is_attached:
+            # Children not ready yet; try again on the next refresh.
+            self.call_after_refresh(self._populate)
+            return
         self._rebuild_rows()
         self._update_badge()
 
@@ -51,6 +66,11 @@ class ExpertiseSection(Vertical):
         self._candidates = candidates
         self._selected = selected
 
+        if not self._rows_container.is_attached:
+            # Still mounting; on_mount's deferred _populate will use the
+            # updated _candidates/_selected.
+            return
+
         if candidates_changed:
             self._rebuild_rows()
         else:
@@ -62,6 +82,9 @@ class ExpertiseSection(Vertical):
 
     def _rebuild_rows(self) -> None:
         """Replace all ModelRow children with one per current candidate."""
+        if not self._rows_container.is_attached:
+            return
+
         for child in list(self._rows_container.children):
             child.remove()
 
@@ -79,10 +102,12 @@ class ExpertiseSection(Vertical):
 
     def _update_badge(self) -> None:
         """Show the [SELECTED] badge iff a model is chosen for this tag."""
-        badge = self.query_one(".expertise-section-badge", Static)
-        badge.styles.display = "block" if self._selected is not None else "none"
+        if not self._badge.is_attached:
+            return
+        self._badge.styles.display = "block" if self._selected is not None else "none"
 
     def set_has_selection(self, has: bool) -> None:
         """Kept for backwards compatibility with callers that still use it."""
-        badge = self.query_one(".expertise-section-badge", Static)
-        badge.styles.display = "block" if has else "none"
+        if not self._badge.is_attached:
+            return
+        self._badge.styles.display = "block" if has else "none"
