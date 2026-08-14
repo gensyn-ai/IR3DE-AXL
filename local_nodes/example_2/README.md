@@ -1,6 +1,6 @@
 # Example 2
 
-The same seven IR3DE expertise models used in [example_1](../example_1/README.md), but each one now lives on its own node. Seven nodes total, connected in a star topology with Node 00 at the center.
+The same seven expertise models used in [example_1](../example_1/README.md), but each one now lives on its own node. Seven nodes total, connected in a star topology with Node 00 at the center.
 
 ## Nodes
 
@@ -14,8 +14,13 @@ The same seven IR3DE expertise models used in [example_1](../example_1/README.md
 | 05 | Mnemosyne | history | `ambrosfitz/tinyllama-history-chat-v1.5` |
 | 06 | Prometheus | philosophy | `amitbehura/philosophy-oracle-smollm2-360m` |
 
-These are the exact same models discussed in
-[example_1's Nodes section](../example_1/README.md#nodes). To use the gated original `meta-llama/Llama-3.2-3B` tokenizer, follow the instructions in `example_1`, editing `metadataNN.json` for nodes 00–03.
+These are the same models (and generation tokenizers) described in
+[example_1's Nodes section](../example_1/README.md#nodes).
+
+IR3DE routing stats match [example_1](../example_1/README.md#ir3de-stats): with
+default `--tok-type mistral`, peers load Mistral entries from
+`ir3de_stats/default_stats.json`. That is unrelated to each expert's generation
+tokenizer.
 
 ## Topology
 

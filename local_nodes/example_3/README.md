@@ -15,7 +15,7 @@ Eight local nodes connected in a randomly generated directed graph. Each node se
 | 06 | Tyr | math, instruction, physics | coding (m2d2_cs_l1) |
 | 07 | Forseti | — | math (m2d2_math_l1), philosophy (m2d2_Philosophy_and_thinking) |
 
-The coding/math/multilingual/instruction and physics/history/philosophy models are the same ones (and the same tokenizer choices) discussed in [example_1](../example_1/README.md#nodes). Heimdall's second model, `MergeBench/gemma-2-2b_instruction`, is a different, ungated `MergeBench` family with its own bundled tokenizer — used alongside Tyr's Llama-based instruction model to show that different nodes can serve the same tag with different underlying models.
+The coding/math/multilingual/instruction and physics/history/philosophy models are the same ones (and the same generation-tokenizer choices) discussed in [example_1](../example_1/README.md#nodes). Heimdall's second model, `MergeBench/gemma-2-2b_instruction`, is a different, ungated `MergeBench` family with its own bundled tokenizer — used alongside Tyr's Llama-based instruction model to show that different nodes can serve the same tag with different underlying models.
 
 ## Topology
 
@@ -27,11 +27,7 @@ The periodic greeting/gossip mechanism makes every node in a single connected co
 ## IR3DE stats
 
 The stats in the table above come from the
-[`Erosinho/IR3DE-stats`](https://huggingface.co/Erosinho/IR3DE-stats) repo, downloaded automatically the first time each is used. This example uses IR3DE stats extracted using 
-the `Meta-Llama-3-8B` tokenizer and embedding layer. However, since `meta-llama/Meta-Llama-3-8B` is gated, before running this example:
-1. Request access at [huggingface.co/meta-llama/Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B) and wait for approval.
-2. Log in locally with a token that has that access: `huggingface-cli login` (or set the `HF_TOKEN` environment variable).
-
+[`Erosinho/IR3DE-stats`](https://huggingface.co/Erosinho/IR3DE-stats) repo, downloaded automatically the first time each is used. This example uses IR3DE stats extracted with the `Mistral-7B-v0.1` tokenizer and embedding layer — the same identity as the default `--tok-type mistral`.
 Normally every node also automatically serves everything listed in `ir3de_stats/default_stats.json` on top of its own `metadata.json` (see `Peer.__init__` in `src/peer.py`). This example wants each node to serve *only* the specific stats listed for it above, so `setup.sh` backs up `ir3de_stats/default_stats.json` and replaces it with one serving no stats
 at all (`{"stats": []}`).
 
@@ -61,7 +57,7 @@ Given that in this example all eight nodes run on the same machine, running
 them together adds these up — though Thor and Tyr share the same physics
 model, so combined RAM in practice will be a bit less than the sum. IR3DE
 stats add roughly 5 GB more disk (shared across nodes) and roughly 2 GB
-more RAM per node using stats (00, 01, 03, 04, 06, 07), for the Llama
+more RAM per node using stats (00, 01, 03, 04, 06, 07), for the Mistral
 tokenizer/embedder they need.
 
 ## Run it
@@ -82,29 +78,40 @@ ed25519 private key for each node. Then, in eight separate terminals from
 the repo root:
 
 ```
-python run.py --peer-id 00 --tok-type llama
+python run.py --peer-id 00
 ```
 ```
-python run.py --peer-id 01 --tok-type llama
+python run.py --peer-id 01
 ```
 ```
-python run.py --peer-id 02 --tok-type llama
+python run.py --peer-id 02
 ```
 ```
-python run.py --peer-id 03 --tok-type llama
+python run.py --peer-id 03
 ```
 ```
-python run.py --peer-id 04 --tok-type llama
+python run.py --peer-id 04
 ```
 ```
-python run.py --peer-id 05 --tok-type llama
+python run.py --peer-id 05
 ```
 ```
-python run.py --peer-id 06 --tok-type llama
+python run.py --peer-id 06
 ```
 ```
-python run.py --peer-id 07 --tok-type llama
+python run.py --peer-id 07
 ```
 
 When you're done, restore `ir3de_stats/default_stats.json` as described in
 the IR3DE stats section above.
+
+## Extracting IR3DE stats (optional)
+
+Every IR3DE stats file this repo uses is already computed and published on Hugging Face ([`Erosinho/IR3DE-stats`](https://huggingface.co/Erosinho/IR3DE-stats)), and `peer.py` downloads whichever ones it needs automatically at runtime. Therefore, **you do not need to run anything in this section to use this repo.**
+
+`src/extract_ir3de_stats.py` is kept as a worked example of how those stats were produced, in case you want to add IR3DE support for a new dataset, tokenizer, or embedding layer. The reasoning-benchmark datasets (`gsm8k`, `m_arc`, `humaneval`, `ifeval`) are downloaded automatically via `lm-eval-harness`; the CLM/M2D2 domain datasets (`cs_l1`, `math_l1`, `physics_l1`, `History_and_events`, `Philosophy_and_thinking`) need to be downloaded and prepared by hand first, following the instructions in
+[gensyn-ai/dume's dataset README](https://github.com/gensyn-ai/dume/blob/main/dataset/README.md).
+
+```
+python src/extract_ir3de_stats.py --dataset DATASET [--tok-type {mistral,llama}] [options]
+```

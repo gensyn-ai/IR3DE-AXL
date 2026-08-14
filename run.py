@@ -28,7 +28,7 @@ Key options (see utils.get_args() for the full list and defaults):
                           summarized (0 disables summarization)
 
 Example:
-    python run.py --peer-id 01 --tok-type mistral
+    python run.py --peer-id 01
 """
 import os
 import sys

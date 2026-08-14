@@ -11,7 +11,7 @@ each with its own clone of this repository, connected in a cycle. Each machine r
 | B | Tezcatlipoca | multilingual, history |
 | C | Huitzilopochtli | instruction, philosophy |
 
-The models (and tokenizer choices) are the same seven discussed in [example_1](../example_1/README.md#nodes), just split three ways instead of two. All nodes use the repo's default IR3DE stats from `ir3de_stats/default_stats.json`.
+The models are the same seven discussed in [example_1](../example_1/README.md#nodes).
 
 ## Remote setup
 

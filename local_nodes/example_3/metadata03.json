@@ -4,29 +4,41 @@
   "models": [
     {
       "hf_name": "MergeBench/Llama-3.2-3B-Instruct_multilingual",
-      "tags": ["multilingual"],
+      "tags": [
+        "multilingual"
+      ],
       "tokenizer": "unsloth/Llama-3.2-3B"
     },
     {
       "hf_name": "MergeBench/gemma-2-2b_instruction",
-      "tags": ["instruction"],
+      "tags": [
+        "instruction"
+      ],
       "tokenizer": "MergeBench/gemma-2-2b_instruction"
     }
   ],
   "stats": [
     {
-      "path": "ir3de_stats/Meta-Llama-3-8B_m_arc.pth",
-      "tags": ["multilingual"],
-      "datasets_names": ["m_arc"],
-      "tokenizer_name": "meta-llama/Meta-Llama-3-8B",
-      "embedder_name": "meta-llama/Meta-Llama-3-8B"
+      "path": "ir3de_stats/Mistral-7B-v0.1_m_arc.pth",
+      "tags": [
+        "multilingual"
+      ],
+      "datasets_names": [
+        "m_arc"
+      ],
+      "tokenizer_name": "mistralai/Mistral-7B-v0.1",
+      "embedder_name": "mistralai/Mistral-7B-v0.1"
     },
     {
-      "path": "ir3de_stats/Meta-Llama-3-8B_ifeval.pth",
-      "tags": ["instruction"],
-      "datasets_names": ["ifeval"],
-      "tokenizer_name": "meta-llama/Meta-Llama-3-8B",
-      "embedder_name": "meta-llama/Meta-Llama-3-8B"
+      "path": "ir3de_stats/Mistral-7B-v0.1_ifeval.pth",
+      "tags": [
+        "instruction"
+      ],
+      "datasets_names": [
+        "ifeval"
+      ],
+      "tokenizer_name": "mistralai/Mistral-7B-v0.1",
+      "embedder_name": "mistralai/Mistral-7B-v0.1"
     }
   ]
 }

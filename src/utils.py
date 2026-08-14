@@ -22,7 +22,6 @@ from huggingface_hub.utils import EntryNotFoundError
 from rich.text import Text
 from safetensors import safe_open
 from termcolor import colored
-from textual.widgets import Log
 from tqdm import tqdm as _tqdm
 from transformers import AutoModelForCausalLM
 
@@ -48,7 +47,7 @@ ACTIVATE_UI = True
 MAX_TITLE_CHARS = 60
 
 _log_widget = None
-_output_widgets: dict[str, "Log"] = {}
+_output_widgets: dict[str, object] = {}
 
 _LOG_BUFFER_MAX = 10_000
 _log_buffer: deque = deque(maxlen=_LOG_BUFFER_MAX)
@@ -57,11 +56,6 @@ _log_lock = threading.Lock()
 _filter_predicate = lambda msg_type: True
 
 
-def _write_chat_line(widget, line: Text) -> None:
-    """Append one chat transcript line to a selectable Log (plain text)."""
-    widget.write_line(line.plain)
-
- 
 def set_log_widget(widget):
     """Register the Logs tab's RichLog as log()'s target for left-side entries.
     Called once from IR3DEApp.on_mount."""
@@ -70,7 +64,7 @@ def set_log_widget(widget):
 
 
 def set_output_widget(chat_id: str, widget) -> None:
-    """Register a chat's Log as log()'s target for that chat's right-side
+    """Register a chat's RichLog as log()'s target for that chat's right-side
     entries. Called from IR3DEApp._mount_chat_tab when a chat tab is opened."""
     _output_widgets[chat_id] = widget
 
@@ -82,7 +76,7 @@ def unset_output_widget(chat_id: str) -> None:
 
 
 def get_output_widget(chat_id: str):
-    """The chat Log currently registered for a chat_id, or None if its tab isn't open."""
+    """The chat RichLog currently registered for a chat_id, or None if its tab isn't open."""
     return _output_widgets.get(chat_id)
 
  
@@ -268,10 +262,7 @@ def log(message, node_id, msg_type=None, msg_id=None, right=False, chat_id=None)
             target = _log_widget
 
         if target is not None:
-            if right:
-                _write_chat_line(target, line)
-            else:
-                target.write(line)
+            target.write(line)
         else:
             print(line.plain)
     else:
@@ -629,7 +620,7 @@ def format_mean_std(values, unit="s", scale=1.0, precision=2):
     return f"{m:.{precision}f} ± {s:.{precision}f} {unit}"
 
 def render_chat_history_into(chat: dict, widget) -> None:
-    """Replay a chat's persisted message list into a selectable Log. Mirrors
+    """Replay a chat's persisted message list into a RichLog. Mirrors
     the visual format of log(..., right=True) without going through it (so we
     don't pollute _log_buffer with replays)."""
     for m in chat.get("messages", []):
@@ -650,9 +641,11 @@ def render_chat_history_into(chat: dict, widget) -> None:
             else:
                 node_label = "[AGENT]"
         failed = "(failed) " if m.get("status") == "failed" else ""
-        widget.write_line(
-            f"{node_label} [{time_part}] {failed}{m.get('text', '')}"
-        )
+        line = Text()
+        line.append(f"{node_label} ", style="bold dim white")
+        line.append(f"[{time_part}] ", style="dim white")
+        line.append(f"{failed}{m.get('text', '')}", style="#ffffff")
+        widget.write(line)
 
 
 # ───────────────────────── run.py support ─────────────────────────

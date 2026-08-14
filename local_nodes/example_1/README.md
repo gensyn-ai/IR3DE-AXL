@@ -14,11 +14,6 @@ Hosts four [MergeBench](https://huggingface.co/MergeBench) Llama-3.2-3B experts:
 | multilingual | `MergeBench/Llama-3.2-3B_multilingual` |
 | instruction | `MergeBench/Llama-3.2-3B_instruction` |
 
-The default configuration uses the ungated tokenizer hosted at `unsloth/Llama-3.2-3B`. To use the official tokenizer from the gated `meta-llama/Llama-3.2-3B` repository instead:
-1. Request access at [huggingface.co/meta-llama/Llama-3.2-3B](https://huggingface.co/meta-llama/Llama-3.2-3B) and wait for approval.
-2. Log in locally with a token that has that access: `huggingface-cli login` (or set the `HF_TOKEN` environment variable).
-3. Before running `setup.sh`, edit this directory's `metadata00.json` and change every `"tokenizer": "unsloth/Llama-3.2-3B"` to `"tokenizer": "meta-llama/Llama-3.2-3B"`.
-
 **Node 01 — "Seth"** (`local_nodes/config01.json`/`metadata01.json`)
 Hosts three small, standalone domain-expert models:
 
@@ -27,6 +22,14 @@ Hosts three small, standalone domain-expert models:
 | physics    | `benhaotang/llama3.2-1B-physics-finetuned` |
 | history    | `ambrosfitz/tinyllama-history-chat-v1.5` |
 | philosophy | `amitbehura/philosophy-oracle-smollm2-360m` |
+
+## IR3DE stats 
+
+Routing uses IR3DE stats from `ir3de_stats/default_stats.json` (downloaded from
+[`Erosinho/IR3DE-stats`](https://huggingface.co/Erosinho/IR3DE-stats) on first use).
+With the default `--tok-type mistral`, peers load the **Mistral-7B-v0.1** stats
+entries from that file. That routing identity is separate from the expert-model
+`"tokenizer"` fields above, which are only used when an expert generates an answer.
 
 ## Visibility
 

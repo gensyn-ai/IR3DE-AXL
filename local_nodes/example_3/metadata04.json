@@ -4,17 +4,23 @@
   "models": [
     {
       "hf_name": "ambrosfitz/tinyllama-history-chat-v1.5",
-      "tags": ["history"],
+      "tags": [
+        "history"
+      ],
       "tokenizer": "ambrosfitz/tinyllama-history-chat-v1.5"
     }
   ],
   "stats": [
     {
-      "path": "ir3de_stats/Meta-Llama-3-8B_m2d2_History_and_events.pth",
-      "tags": ["history"],
-      "datasets_names": ["M2D2/History_and_events"],
-      "tokenizer_name": "meta-llama/Meta-Llama-3-8B",
-      "embedder_name": "meta-llama/Meta-Llama-3-8B"
+      "path": "ir3de_stats/Mistral-7B-v0.1_m2d2_History_and_events.pth",
+      "tags": [
+        "history"
+      ],
+      "datasets_names": [
+        "M2D2/History_and_events"
+      ],
+      "tokenizer_name": "mistralai/Mistral-7B-v0.1",
+      "embedder_name": "mistralai/Mistral-7B-v0.1"
     }
   ]
 }

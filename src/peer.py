@@ -818,6 +818,20 @@ class Peer:
         run_peer loop, on the --discover-peers-interval schedule."""
 
         log(f"Discovering peers in the network...", self.peer_id, msg_type=None)
+
+        # Topology is fetched once at startup; configured peers that were still
+        # offline then keep public_key=''. Re-fetch whenever any key is empty so
+        # outbound-only nodes (e.g. example_3 peers 00/02) can greet once neighbors
+        # come up — nobody will greet them inbound on a directed edge.
+        if self.topology.get('peers') is not None and any(
+            not pk.get('public_key') for pk in self.topology['peers']
+        ):
+            try:
+                self.topology = self.get_topology(self.session)
+                log("Refreshed AXL topology (some configured peers had empty public keys).",
+                    self.peer_id, msg_type=None)
+            except Exception as e:
+                log(f"Failed to refresh AXL topology: {e}", self.peer_id, msg_type="warning")
         
         if self.topology['peers'] is None and len(self.known_public_keys) == 0:
             log(f"Attempted sending greetings to known peers, but no known public keys found.", self.peer_id, msg_type=None)
@@ -1130,7 +1144,10 @@ class Peer:
                 ref_stats = stats
                 break
         if ref_stats is None:
-            log(f"No reference stats found for tokenizer {self.default_tokenizer_name} and embedder {self.default_embedder_name}. Cannot handle user input.", self.peer_id, msg_type="warning")
+            reason = (f"No reference stats found for tokenizer {self.default_tokenizer_name} "
+                      f"and embedder {self.default_embedder_name}.")
+            self._token_router_fail_reason = reason
+            log(f"{reason} Cannot handle user input.", self.peer_id, msg_type="warning")
             return
         
         with torch.no_grad():
@@ -1167,13 +1184,13 @@ class Peer:
 
             if not b_dict:
                 if not self.selected_tags:
-                    log("No expertise selected. Activate at least one in the Control Panel.",
-                        self.peer_id, msg_type="warning")
+                    reason = "No expertise selected. Activate at least one in the Control Panel."
                 else:
-                    log(f"No stats available yet for the selected tags "
-                        f"{sorted(self.selected_tags)}. The local peer doesn't carry stats "
-                        f"for these tags and no peer has shared matching stats yet.",
-                        self.peer_id, msg_type="warning")
+                    reason = (f"No stats available yet for the selected tags "
+                              f"{sorted(self.selected_tags)}. The local peer doesn't carry stats "
+                              f"for these tags and no peer has shared matching stats yet.")
+                self._token_router_fail_reason = reason
+                log(reason, self.peer_id, msg_type="warning")
                 return None
 
             b = torch.zeros((emb_dim + 1, len(b_dict)), dtype=torch.float32, device=self.device)
@@ -1190,6 +1207,7 @@ class Peer:
             W = W / norm
             bias = bias / norm[0, :]
 
+        self._token_router_fail_reason = None
         router = torch.nn.Linear(W.shape[0], W.shape[1]).to(self.device)
         router.weight.data = W.T
         router.bias.data = bias.T
@@ -1361,9 +1379,12 @@ class Peer:
         else:
             out = self.get_token_router()
             if out is None:
-                log("Cannot handle user input because token router could not be constructed.",
+                reason = getattr(self, "_token_router_fail_reason", None) or (
+                    "token router could not be constructed"
+                )
+                log(f"Cannot handle user input because {reason}",
                     self.peer_id, msg_type="warning")
-                log("Cannot handle user input. Please select at least one expertise in the Control Panel.",
+                log(f"Cannot handle user input. {reason}",
                     self.peer_id, msg_type="warning", right=True, chat_id=chat_id)
                 self._mark_answer_resolved(chat_id)
                 return

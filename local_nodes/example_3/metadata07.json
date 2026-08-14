@@ -4,18 +4,26 @@
   "models": [],
   "stats": [
     {
-      "path": "ir3de_stats/Meta-Llama-3-8B_m2d2_math_l1.pth",
-      "tags": ["math"],
-      "datasets_names": ["M2D2/math_l1"],
-      "tokenizer_name": "meta-llama/Meta-Llama-3-8B",
-      "embedder_name": "meta-llama/Meta-Llama-3-8B"
+      "path": "ir3de_stats/Mistral-7B-v0.1_m2d2_math_l1.pth",
+      "tags": [
+        "math"
+      ],
+      "datasets_names": [
+        "M2D2/math_l1"
+      ],
+      "tokenizer_name": "mistralai/Mistral-7B-v0.1",
+      "embedder_name": "mistralai/Mistral-7B-v0.1"
     },
     {
-      "path": "ir3de_stats/Meta-Llama-3-8B_m2d2_Philosophy_and_thinking.pth",
-      "tags": ["philosophy"],
-      "datasets_names": ["M2D2/Philosophy_and_thinking"],
-      "tokenizer_name": "meta-llama/Meta-Llama-3-8B",
-      "embedder_name": "meta-llama/Meta-Llama-3-8B"
+      "path": "ir3de_stats/Mistral-7B-v0.1_m2d2_Philosophy_and_thinking.pth",
+      "tags": [
+        "philosophy"
+      ],
+      "datasets_names": [
+        "M2D2/Philosophy_and_thinking"
+      ],
+      "tokenizer_name": "mistralai/Mistral-7B-v0.1",
+      "embedder_name": "mistralai/Mistral-7B-v0.1"
     }
   ]
 }

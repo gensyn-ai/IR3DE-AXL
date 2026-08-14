@@ -4,24 +4,34 @@
   "models": [
     {
       "hf_name": "benhaotang/llama3.2-1B-physics-finetuned",
-      "tags": ["physics"],
+      "tags": [
+        "physics"
+      ],
       "tokenizer": "benhaotang/llama3.2-1B-physics-finetuned"
     }
   ],
   "stats": [
     {
-      "path": "ir3de_stats/Meta-Llama-3-8B_m2d2_physics_l1.pth",
-      "tags": ["physics"],
-      "datasets_names": ["M2D2/physics_l1"],
-      "tokenizer_name": "meta-llama/Meta-Llama-3-8B",
-      "embedder_name": "meta-llama/Meta-Llama-3-8B"
+      "path": "ir3de_stats/Mistral-7B-v0.1_m2d2_physics_l1.pth",
+      "tags": [
+        "physics"
+      ],
+      "datasets_names": [
+        "M2D2/physics_l1"
+      ],
+      "tokenizer_name": "mistralai/Mistral-7B-v0.1",
+      "embedder_name": "mistralai/Mistral-7B-v0.1"
     },
     {
-      "path": "ir3de_stats/Meta-Llama-3-8B_gsm8k.pth",
-      "tags": ["math"],
-      "datasets_names": ["gsm8k"],
-      "tokenizer_name": "meta-llama/Meta-Llama-3-8B",
-      "embedder_name": "meta-llama/Meta-Llama-3-8B"
+      "path": "ir3de_stats/Mistral-7B-v0.1_gsm8k.pth",
+      "tags": [
+        "math"
+      ],
+      "datasets_names": [
+        "gsm8k"
+      ],
+      "tokenizer_name": "mistralai/Mistral-7B-v0.1",
+      "embedder_name": "mistralai/Mistral-7B-v0.1"
     }
   ]
 }

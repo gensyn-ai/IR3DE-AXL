@@ -12,7 +12,7 @@ network, each hosting one or more domain-expert LLMs (coding, math,
 physics, ...), using **IR3DE** to decide, for every message across the
 whole network, which expert is best suited to answer it.
 
-[IR3DE](https://arxiv.org/pdf/2606.06098) is a lightweight, inference router that automatically selects the best domain expert for any given prompt. Rather than training a model to pick an expert, each expert is represented by a small ridge-regression fit (an `A`/`b` matrix pair) over its domain's own token embeddings. To route a message, its tokens are embedded, scored against every candidate tag's regression, filtered by entropy (uncertain tokens are dropped), and the remaining tokens "vote" for the tag whose expert should answer. Adding or removing an expert just means adding or removing its regression stats — never
+[IR3DE](https://arxiv.org/pdf/2606.06098) is a lightweight inference router that automatically selects the best domain expert for any given prompt. Rather than training a model to pick an expert, each expert is represented by a small ridge-regression fit (an `A`/`b` matrix pair) over its domain's own token embeddings. To route a message, its tokens are embedded, scored against every candidate tag's regression, filtered by entropy (uncertain tokens are dropped), and the remaining tokens "vote" for the tag whose expert should answer. Adding or removing an expert just means adding or removing its regression stats — never
 retraining the router itself. See the [paper](https://arxiv.org/pdf/2606.06098), the [official IR3DE code](https://github.com/gensyn-ai/IR3DE), and the
 [blog post](https://blog.gensyn.ai/look-beyond-one-size-fits-all-llms-with-ir3de/)
 for the full research behind the router.
@@ -92,27 +92,14 @@ at once (see step 2); omit it to run the single default local peer.
 
 ## Examples
 
-Four ready-made setups live in `local_nodes/`, each self-contained with its
-own `setup.sh` and README:
+Several ready-made setups live in `local_nodes/`, each with its own `setup.sh`
+and README:
 
-| Example | Nodes | Topology | What it shows |
-|---------|-------|----------|----------------|
-| [example_1](local_nodes/example_1/README.md) | 2, local | asymmetric pair | Two nodes with disjoint experts covering 7 domains between them. |
-| [example_2](local_nodes/example_2/README.md) | 7, local | star | One model per node in a star topology, showing how visibility propagates outward from a hub. |
-| [example_3](local_nodes/example_3/README.md) | 8, local | random | A denser, randomly generated (but reproducible) network with one or more experts per each domain. Each node serves different IR3DE stats. |
-| [example_4](local_nodes/example_4/README.md) | 3, remote | cycle | Runs across three separate physical machines instead of simulating multiple peers on one; requires real, reachable IP addresses between nodes. |
+[Local 2-node example](local_nodes/example_1/README.md) shows how to setup two nodes with disjoint experts covering 7 domains between them. This example can be run in a single local device.
+
+[Remote 3-node example](local_nodes/example_4/README.md) shows how to run across three separate physical machines, each hosting some domain experts. It requires real, reachable IP addresses between the nodes. 
+
+You can also find examples on [different network topologies](local_nodes/example_2/README.md) and how to [setup and serve different IR3DE stats](local_nodes/example_3/README.md).
 
 Each example's `setup.sh` installs its config/metadata into `local_nodes/`; see each README for exact usage and resource requirements, then run each node with `python run.py [--peer-id NN]` as instructed there.
 
-## Extracting IR3DE stats (optional)
-
-Every IR3DE stats file this repo uses is already computed and published on Hugging Face ([`Erosinho/IR3DE-stats`](https://huggingface.co/Erosinho/IR3DE-stats)), and `peer.py` downloads whichever ones it needs automatically at runtime. Therefore, **you do not need to run anything in this section to use this repo.**
-
-`src/extract_ir3de_stats.py` is kept as a worked example of how those stats were produced, in case you want to add IR3DE support for a new dataset, tokenizer, or embedding layer. The reasoning-benchmark datasets (`gsm8k`, `m_arc`, `humaneval`, `ifeval`) are automatically downloaded via `lm-eval-harness`; the CLM/M2D2 domain datasets (`cs_l1`, `math_l1`,
-`physics_l1`, `History_and_events`, `Philosophy_and_thinking`) need to be
-downloaded and prepared by hand first, following the instructions in
-[gensyn-ai/dume's dataset README](https://github.com/gensyn-ai/dume/blob/main/dataset/README.md).
-
-```
-python src/extract_ir3de_stats.py --dataset DATASET [--tok-type {mistral,llama}] [options]
-```

@@ -3,7 +3,7 @@
   "node_name": "Hermes",
   "models": [
     {
-      "hf_name": "MergeBench/Llama-3.2-3B_multilingual",
+      "hf_name": "MergeBench/Llama-3.2-3B-Instruct_multilingual",
       "tags": ["multilingual"],
       "tokenizer": "unsloth/Llama-3.2-3B"
     }
