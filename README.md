@@ -6,16 +6,9 @@
 
 ![IR3DE-AXL](assets/teaser.png)
 
-This repository implements a decentralized, multi-agent chat system: every
-peer is a node on [Gensyn's AXL](https://github.com/gensyn-ai/axl) P2P
-network, each hosting one or more domain-expert LLMs (coding, math,
-physics, ...), using **IR3DE** to decide, for every message across the
-whole network, which expert is best suited to answer it.
+This repository implements a decentralized, multi-agent chat system: every peer is a node on [Gensyn's AXL](https://github.com/gensyn-ai/axl) P2P network, each hosting one or more domain-expert LLMs (coding, math, physics, ...), using **IR3DE** to decide, for every message across the whole network, which expert is best suited to answer it.
 
-[IR3DE](https://arxiv.org/pdf/2606.06098) is a lightweight inference router that automatically selects the best domain expert for any given prompt. Rather than training a model to pick an expert, each expert is represented by a small ridge-regression fit (an `A`/`b` matrix pair) over its domain's own token embeddings. To route a message, its tokens are embedded, scored against every candidate tag's regression, filtered by entropy (uncertain tokens are dropped), and the remaining tokens "vote" for the tag whose expert should answer. Adding or removing an expert just means adding or removing its regression stats — never
-retraining the router itself. See the [paper](https://arxiv.org/pdf/2606.06098), the [official IR3DE code](https://github.com/gensyn-ai/IR3DE), and the
-[blog post](https://blog.gensyn.ai/look-beyond-one-size-fits-all-llms-with-ir3de/)
-for the full research behind the router.
+[IR3DE](https://arxiv.org/pdf/2606.06098) is a lightweight inference router that automatically selects the best domain expert for any given prompt. Rather than training a model to pick an expert, each expert is represented by a small ridge-regression fit (an `A`/`b` matrix pair) over its domain's own token embeddings. To route a message, its tokens are embedded, scored against every candidate tag's regression, filtered by entropy (uncertain tokens are dropped), and the remaining tokens "vote" for the tag whose expert should answer. Adding or removing an expert just means adding or removing its regression stats — never retraining the router itself. See the [paper](https://arxiv.org/pdf/2606.06098), the [official IR3DE code](https://github.com/gensyn-ai/IR3DE), and the [blog post](https://blog.gensyn.ai/look-beyond-one-size-fits-all-llms-with-ir3de/) for the full research behind the router.
 
 **This repository is built directly on top of that work**, adding the AXL P2P transport layer, a Textual-based multi-chat TUI, and the lazy-loading expert-serving infrastructure needed to run a live network of these experts, rather than an offline benchmark.
 
@@ -53,11 +46,7 @@ conda activate ir3deaxl
 
 ### Option B: venv
 
-Requires Python 3.10 available on your PATH as `python3.10` (install it via your OS
-package manager, [python.org](https://www.python.org/downloads/), or `pyenv` if it isn't
-already) — the pinned package versions below were resolved and tested against it, and some
-of them ship platform-specific binary wheels that aren't guaranteed to exist for other
-Python versions.
+Requires Python 3.10 available on your PATH as `python3.10` (install it via your OS package manager, [python.org](https://www.python.org/downloads/), or `pyenv` if it isn't already) — the pinned package versions below were resolved and tested against it, and some of them ship platform-specific binary wheels that aren't guaranteed to exist for other Python versions.
 
 ```
 python3.10 -m venv .venv
@@ -66,34 +55,29 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Both options install the exact same, verified set of package versions (`requirements.txt`
-is the single source of truth — `requirements.yml`'s pip section just references it).
+Both options install the exact same, verified set of package versions (`requirements.txt` is the single source of truth — `requirements.yml`'s pip section just references it).
 
-**GPU note:** `torch` is listed unpinned to a specific CUDA build in both files, so `pip`
-picks whatever wheel matches your platform automatically — on Linux this includes CUDA
-support out of the box. After installing, verify GPU acceleration is actually being used:
+**GPU note:** `torch` is listed unpinned to a specific CUDA build in both files, so `pip` picks whatever wheel matches your platform automatically — on Linux this includes CUDA support out of the box. After installing, verify GPU acceleration is actually being used:
 
 ```
 python -c "import torch; print(torch.cuda.is_available())"
 ```
 
-If that prints `False` on a machine that does have a GPU, reinstall `torch` following the
-selector at [pytorch.org/get-started/locally](https://pytorch.org/get-started/locally/)
-for your CUDA version before reinstalling the rest of `requirements.txt`.
+If that prints `False` on a machine that does have a GPU, reinstall `torch` following the selector at [pytorch.org/get-started/locally](https://pytorch.org/get-started/locally/) for your CUDA version before reinstalling the rest of `requirements.txt`.
 
 4) Run the simulation:
 
 ```
-python run.py [--peer-id PEER_ID]
+python run.py [--peer-id PEER_ID] [--tok-type {mistral,llama}]
 ```
 
-`--peer-id` is only needed when running more than one simulated local peer
-at once (see step 2); omit it to run the single default local peer.
+`--peer-id` is only needed when running more than one simulated local peer at once (see step 2); omit it to run the single default local peer.
+
+`--tok-type` selects which tokenizer/embedder identity this peer uses for IR3DE routing (`mistral` or `llama`; default `mistral`). The IR3DE stats themselves (from [`Erosinho/IR3DE-stats`](https://huggingface.co/Erosinho/IR3DE-stats)) are public for both. The ready-made examples in this repo use the default and do not need a Hugging Face token. However, selecting `--tok-type llama` needs a Hugging Face token because routing then loads the tokenizer and embedding layer of [`meta-llama/Meta-Llama-3-8B`](https://huggingface.co/meta-llama/Meta-Llama-3-8B), which is gated (`hf auth login`, after requesting access on that model page).
 
 ## Examples
 
-Several ready-made setups live in `local_nodes/`, each with its own `setup.sh`
-and README:
+Several ready-made setups live in `local_nodes/`, each with its own `setup.sh` and README:
 
 [Local 2-node example](local_nodes/example_1/README.md) shows how to setup two nodes with disjoint experts covering 7 domains between them. This example can be run in a single local device.
 
