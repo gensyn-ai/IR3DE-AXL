@@ -5,12 +5,12 @@
 # own config00..07.json/metadata00..07.json there, and generates a fresh
 # ed25519 private key for each of the eight nodes.
 #
-# This example also needs ir3de_stats/default_stats.json to serve NO stats
-# by default, so that each node's own metadata.json "stats" list is the
-# only thing it serves (see README.md's IR3DE stats section for why). This
-# script backs that file up alongside everything else and replaces it with
-# an empty one; RESTORE_DEFAULT_STATS.md (written into the backup directory)
-# has the one-line command to put the original back once you're done.
+# This example also needs the peers to serve NO default stats, so that each
+# node's own metadata.json "stats" list is the only thing it serves (see
+# README.md's IR3DE stats section for why). That is done at run time, by
+# passing --default-stats local_nodes/example_3/no_default_stats.json to
+# run.py: this script leaves the shared ir3de_stats/default_stats.json
+# untouched, so the other examples keep working afterwards.
 #
 # Usage (from anywhere):
 #   ./local_nodes/example_3/setup.sh
@@ -39,30 +39,14 @@ if [[ ${#existing[@]} -gt 0 ]]; then
     mv "${existing[@]}" "${BACKUP_DIR}/"
 fi
 
-# 2. Back up the real ir3de_stats/default_stats.json into the same backup
-#    directory, then replace it with one that serves no default stats.
-mkdir -p "${BACKUP_DIR}"
-echo "Backing up ir3de_stats/default_stats.json to ${BACKUP_DIR}..."
-cp "${REPO_ROOT}/ir3de_stats/default_stats.json" "${BACKUP_DIR}/default_stats.json"
-cat > "${REPO_ROOT}/ir3de_stats/default_stats.json" << 'EOF'
-{
-  "stats": []
-}
-EOF
-cat > "${BACKUP_DIR}/RESTORE_DEFAULT_STATS.md" << EOF
-Restore the original default_stats.json (that example_3's setup.sh replaced) with:
-
-  cp "${BACKUP_DIR}/default_stats.json" "${REPO_ROOT}/ir3de_stats/default_stats.json"
-EOF
-
-# 3. Install this example's config/metadata files.
+# 2. Install this example's config/metadata files.
 echo "Installing example config/metadata into ${LOCAL_NODES_DIR}..."
 for nn in "${NODE_IDS[@]}"; do
     cp "${SCRIPT_DIR}/config${nn}.json"   "${LOCAL_NODES_DIR}/config${nn}.json"
     cp "${SCRIPT_DIR}/metadata${nn}.json" "${LOCAL_NODES_DIR}/metadata${nn}.json"
 done
 
-# 4. Generate a fresh ed25519 private key for each node.
+# 3. Generate a fresh ed25519 private key for each node.
 echo "Generating private keys..."
 for nn in "${NODE_IDS[@]}"; do
     if [[ "$(uname)" == "Linux" ]]; then
@@ -73,11 +57,8 @@ for nn in "${NODE_IDS[@]}"; do
 done
 
 echo
-echo "Done. Run the eight nodes from ${REPO_ROOT}, each in its own terminal:"
+echo "Done. Run the eight nodes from ${REPO_ROOT}, each in its own terminal."
+echo "--default-stats is what makes each node serve only its own metadata stats:"
 for nn in "${NODE_IDS[@]}"; do
-    echo "  python run.py --peer-id ${nn}"
+    echo "  python run.py --peer-id ${nn} --default-stats local_nodes/example_3/no_default_stats.json"
 done
-echo
-echo "IMPORTANT: ir3de_stats/default_stats.json was replaced with an empty one for this"
-echo "example. When you're done, restore the original with:"
-echo "  cp \"${BACKUP_DIR}/default_stats.json\" \"${REPO_ROOT}/ir3de_stats/default_stats.json\""

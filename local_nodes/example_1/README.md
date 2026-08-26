@@ -5,14 +5,14 @@ Two local peers that together serve seven experts.
 ## Nodes
 
 **Node 00 — "Horus"** (`local_nodes/config00.json`/`metadata00.json`)
-Hosts four [MergeBench](https://huggingface.co/MergeBench) Llama-3.2-3B experts:
+Hosts four [MergeBench](https://huggingface.co/MergeBench) Llama-3.2-3B-Instruct experts:
 
 | Tag         | Model |
 |-------------|-------|
-| coding      | `MergeBench/Llama-3.2-3B_coding` |
-| math        | `MergeBench/Llama-3.2-3B_math` |
-| multilingual | `MergeBench/Llama-3.2-3B_multilingual` |
-| instruction | `MergeBench/Llama-3.2-3B_instruction` |
+| coding      | `MergeBench/Llama-3.2-3B-Instruct_coding` |
+| math        | `MergeBench/Llama-3.2-3B-Instruct_math` |
+| multilingual | `MergeBench/Llama-3.2-3B-Instruct_multilingual` |
+| instruction | `MergeBench/Llama-3.2-3B-Instruct_instruction` |
 
 **Node 01 — "Seth"** (`local_nodes/config01.json`/`metadata01.json`)
 Hosts three small, standalone domain-expert models:

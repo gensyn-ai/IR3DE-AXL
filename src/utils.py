@@ -718,6 +718,10 @@ def get_args():
                              "prompt + summary + history). When exceeded, oldest user/agent pairs "
                              "are summarized. Set to 0 to disable.")
     parser.add_argument('--tok-type', type=str, default='mistral', choices=['llama', 'mistral'], help='Type of tokenizer to use')
+    parser.add_argument("--default-stats", type=str, default="ir3de_stats/default_stats.json",
+                        help="Path to the JSON file listing the IR3DE stats "
+                             "every peer serves on top of its own metadata.json "
+                             "\"stats\" list.")
     return parser.parse_args()
 
 

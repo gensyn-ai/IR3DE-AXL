@@ -20,6 +20,9 @@ Key options (see utils.get_args() for the full list and defaults):
                           Which tokenizer/embedder identity this peer is
                           active for — determines which IR3DE stats and
                           which default model it uses
+    --default-stats PATH  JSON file of IR3DE stats every peer serves on top
+                          of its own metadata.json (default
+                          ir3de_stats/default_stats.json)
     --answer-timeout SECONDS
                           How long to wait for an expert's answer before
                           giving up
@@ -85,7 +88,8 @@ def run_peer(app, args):
             max_answer_length=args.max_answer_length,
             num_characters_conversation_history=args.num_characters_conversation_history,
             on_axl_ready=_on_axl_ready,
-            tokenizer_name="mistralai/Mistral-7B-v0.1" if args.tok_type == 'mistral' else "meta-llama/Meta-Llama-3-8B"
+            tokenizer_name="mistralai/Mistral-7B-v0.1" if args.tok_type == 'mistral' else "meta-llama/Meta-Llama-3-8B",
+            default_stats_path=args.default_stats,
         )
         if app is not None:
             app.peer = peer

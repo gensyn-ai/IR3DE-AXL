@@ -6,10 +6,10 @@ The same seven expertise models used in [example_1](../example_1/README.md), but
 
 | Node | Name | Tag | Model |
 |------|------|-----|-------|
-| 00 | Hephaestus | coding | `MergeBench/Llama-3.2-3B_coding` |
-| 01 | Athena | math | `MergeBench/Llama-3.2-3B_math` |
-| 02 | Hermes | multilingual | `MergeBench/Llama-3.2-3B_multilingual` |
-| 03 | Chiron | instruction | `MergeBench/Llama-3.2-3B_instruction` |
+| 00 | Hephaestus | coding | `MergeBench/Llama-3.2-3B-Instruct_coding` |
+| 01 | Athena | math | `MergeBench/Llama-3.2-3B-Instruct_math` |
+| 02 | Hermes | multilingual | `MergeBench/Llama-3.2-3B-Instruct_multilingual` |
+| 03 | Chiron | instruction | `MergeBench/Llama-3.2-3B-Instruct_instruction` |
 | 04 | Atlas | physics | `benhaotang/llama3.2-1B-physics-finetuned` |
 | 05 | Mnemosyne | history | `ambrosfitz/tinyllama-history-chat-v1.5` |
 | 06 | Prometheus | philosophy | `amitbehura/philosophy-oracle-smollm2-360m` |

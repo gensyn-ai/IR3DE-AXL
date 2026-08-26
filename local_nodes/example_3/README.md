@@ -28,13 +28,10 @@ The periodic greeting/gossip mechanism makes every node in a single connected co
 
 The stats in the table above come from the
 [`Erosinho/IR3DE-stats`](https://huggingface.co/Erosinho/IR3DE-stats) repo, downloaded automatically the first time each is used. This example uses IR3DE stats extracted with the `Mistral-7B-v0.1` tokenizer and embedding layer — the same identity as the default `--tok-type mistral`.
-Normally every node also automatically serves everything listed in `ir3de_stats/default_stats.json` on top of its own `metadata.json` (see `Peer.__init__` in `src/peer.py`). This example wants each node to serve *only* the specific stats listed for it above, so `setup.sh` backs up `ir3de_stats/default_stats.json` and replaces it with one serving no stats
-at all (`{"stats": []}`).
-
-**When you're done with this example**, restore the original file — `setup.sh` prints the exact command, and it's also saved to `local_nodes/<timestamp>-bkp/RESTORE_DEFAULT_STATS.md`:
+Normally every node also automatically serves everything listed in `ir3de_stats/default_stats.json` on top of its own `metadata.json` (see `Peer.__init__` in `src/peer.py`). This example wants each node to serve *only* the specific stats listed for it above, so every node here is run with `--default-stats` pointed at `no_default_stats.json`, which lists no stats at all (`{"stats": []}`):
 
 ```
-cp local_nodes/<timestamp>-bkp/default_stats.json ir3de_stats/default_stats.json
+python run.py --peer-id NN --default-stats local_nodes/example_3/no_default_stats.json
 ```
 
 ## Resource requirements
@@ -69,41 +66,36 @@ From the repo root, with dependencies already installed (see the main
 ./local_nodes/example_3/setup.sh
 ```
 
-This backs up whatever's currently in `local_nodes/` and
-`ir3de_stats/default_stats.json` (into a fresh
+This backs up whatever's currently in `local_nodes/` (into a fresh
 `local_nodes/<timestamp>-bkp/` directory — nothing is deleted), copies this
-example's config/metadata files into `local_nodes/`, replaces
-`ir3de_stats/default_stats.json` with an empty one, and generates a new
+example's config/metadata files into `local_nodes/`, and generates a new
 ed25519 private key for each node. Then, in eight separate terminals from
 the repo root:
 
 ```
-python run.py --peer-id 00
+python run.py --peer-id 00 --default-stats local_nodes/example_3/no_default_stats.json
 ```
 ```
-python run.py --peer-id 01
+python run.py --peer-id 01 --default-stats local_nodes/example_3/no_default_stats.json
 ```
 ```
-python run.py --peer-id 02
+python run.py --peer-id 02 --default-stats local_nodes/example_3/no_default_stats.json
 ```
 ```
-python run.py --peer-id 03
+python run.py --peer-id 03 --default-stats local_nodes/example_3/no_default_stats.json
 ```
 ```
-python run.py --peer-id 04
+python run.py --peer-id 04 --default-stats local_nodes/example_3/no_default_stats.json
 ```
 ```
-python run.py --peer-id 05
+python run.py --peer-id 05 --default-stats local_nodes/example_3/no_default_stats.json
 ```
 ```
-python run.py --peer-id 06
+python run.py --peer-id 06 --default-stats local_nodes/example_3/no_default_stats.json
 ```
 ```
-python run.py --peer-id 07
+python run.py --peer-id 07 --default-stats local_nodes/example_3/no_default_stats.json
 ```
-
-When you're done, restore `ir3de_stats/default_stats.json` as described in
-the IR3DE stats section above.
 
 ## Extracting IR3DE stats (optional)
 

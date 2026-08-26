@@ -69,14 +69,22 @@ def _load_or_create_local_peer_id() -> str:
 class Peer:
 
     def __init__(self, peer_id, ir3de_lambda=0.01, ir3de_entropy_top_k=10, max_answer_length=256,
-                 num_characters_conversation_history=8000, on_axl_ready=None, tokenizer_name="mistralai/Mistral-7B-v0.1"):
+                 num_characters_conversation_history=8000, on_axl_ready=None, tokenizer_name="mistralai/Mistral-7B-v0.1",
+                 default_stats_path="ir3de_stats/default_stats.json"):
         """Start this peer's AXL node subprocess, load its expert models and
         matching IR3DE stats, and load (or create) its chats. Constructed
         once by run.py's run_peer on a background thread; blocks for several
         seconds while the AXL node comes up and models load."""
 
-        with open(f"ir3de_stats/default_stats.json", "r") as f:
-            default_stats = json.load(f)
+        try:
+            with open(default_stats_path, "r") as f:
+                default_stats = json.load(f)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"Default IR3DE stats file '{default_stats_path}' not found. Restore it from "
+                f"git (git checkout -- {default_stats_path}) or pass --default-stats with the "
+                f"path to the file this peer should use."
+            ) from e
 
         if peer_id is None:
             metadata_path = f"local_nodes/metadata.json"
@@ -126,6 +134,9 @@ class Peer:
         self.selected_tags: set[str] = set()
         self.selected_models: dict[str, tuple[str, int]] = {}
         self.default_tokenizer_name = self.default_embedder_name = tokenizer_name
+        # Only populated when no local stats carry the active identifier; see
+        # _get_router_identity.
+        self._router_identity: tuple | None = None
 
         # Models load/generate in model_worker's own process (see its module
         # docstring for why). mp_context="spawn" because this process may
@@ -172,6 +183,18 @@ class Peer:
             log(f"Skipped {skipped} stats entr{'y' if skipped == 1 else 'ies'} not matching "
                 f"active identifier ({self.default_tokenizer_name}, {self.default_embedder_name}).",
                 self.peer_id, msg_type=None)
+        if not self.stats_info:
+            # Legitimate for a peer that contributes no stats of its own and
+            # routes purely with what the network shares (see
+            # local_nodes/example_3), but it is also what an emptied
+            # default_stats.json or a --tok-type mismatch looks like, and
+            # those only surface later, as routing that never finds a tag.
+            log(f"No local IR3DE stats match the active identifier "
+                f"({self.default_tokenizer_name}, {self.default_embedder_name}): neither "
+                f"'{default_stats_path}' nor '{metadata_path}' lists an entry for it. Routing "
+                f"will rely entirely on stats shared by peers. If that is not intended, check "
+                f"that --tok-type matches the stats you expect and that '{default_stats_path}' "
+                f"is not empty.", self.peer_id, msg_type="warning")
         self.stats = self.get_stats_info()
 
         self.default_lambda = ir3de_lambda
@@ -1130,6 +1153,32 @@ class Peer:
         
         log(f"Shared stats with {sender[:8]}... in response to stats request. msg_id = {msg_id}", self.peer_id, msg_type="stats", msg_id=msg_id)
 
+    def _get_router_identity(self):
+        """Return the (tokenizer, embedder) pair for this peer's active
+        identifier, used to embed a message's tokens before scoring them.
+
+        Both come free with any locally loaded stats entry, so prefer those.
+        A peer carrying no local stats of its own still needs them to route
+        with stats received from the network (see local_nodes/example_3),
+        so fall back to loading them by name — lazily, on the first message
+        the peer routes, since that download is wasted on a peer that only
+        ever answers other peers' requests."""
+        for stats_info, stats in zip(self.stats_info, self.stats):
+            if (stats_info['tokenizer_name'] == self.default_tokenizer_name
+                    and stats_info['embedder_name'] == self.default_embedder_name):
+                return stats['tokenizer'], stats['embedder']
+
+        if self._router_identity is None:
+            log(f"No local stats carry the active identifier "
+                f"({self.default_tokenizer_name}, {self.default_embedder_name}); loading its "
+                f"tokenizer and embedding layer directly to route with stats received from "
+                f"peers.", self.peer_id, msg_type=None)
+            self._router_identity = (
+                AutoTokenizer.from_pretrained(self.default_tokenizer_name),
+                load_embedder_only(self.default_embedder_name),
+            )
+        return self._router_identity
+
     def get_token_router(self):
         """Build the ridge-regression router (a Linear layer) from the
         combined local + known-peers IR3DE stats for the currently-selected
@@ -1138,21 +1187,17 @@ class Peer:
         stats are available yet for the selected tags."""
 
         identifier = (self.default_tokenizer_name, self.default_embedder_name)
-        ref_stats = None
-        for stats_info, stats in zip(self.stats_info, self.stats):
-            if stats_info['tokenizer_name'] == self.default_tokenizer_name and stats_info['embedder_name'] == self.default_embedder_name:
-                ref_stats = stats
-                break
-        if ref_stats is None:
-            reason = (f"No reference stats found for tokenizer {self.default_tokenizer_name} "
-                      f"and embedder {self.default_embedder_name}.")
+        try:
+            tokenizer, embedder = self._get_router_identity()
+        except Exception as e:
+            reason = (f"Could not load the tokenizer/embedding layer for "
+                      f"{self.default_tokenizer_name} ({e}).")
             self._token_router_fail_reason = reason
             log(f"{reason} Cannot handle user input.", self.peer_id, msg_type="warning")
             return
-        
+
         with torch.no_grad():
-            tokenizer = ref_stats['tokenizer']
-            embedder = ref_stats['embedder'].to(self.device)
+            embedder = embedder.to(self.device)
             known_tags = self.known_tags
             emb_dim = embedder.weight.shape[1]
             A = torch.zeros((emb_dim + 1, emb_dim + 1), dtype=torch.float32, device=self.device)
@@ -1174,7 +1219,7 @@ class Peer:
                                     else:
                                         b_dict[tag] += b_peer                                    
             
-            for tag in self.local_A[identifier]:
+            for tag in self.local_A.get(identifier, {}):
                 if tag in self.selected_tags:
                     A += self.local_A[identifier][tag].to(self.device)
                     if tag not in b_dict:
