@@ -12,9 +12,12 @@
 # local_nodes/pk.pem currently exist, installs this example's config.json
 # (same file for every role — it's a placeholder-based template, see the
 # README) and the role-specific metadata<ROLE>.json as local_nodes/metadata.json,
-# and generates a fresh ed25519 private key. You still need to edit
-# local_nodes/config.json by hand afterward to fill in the real IP address
-# of the next node in the cycle (see the README).
+# generates a fresh ed25519 private key, and downloads this role's Hugging
+# Face expert models (and their tokenizers), the Mistral IR3DE stats from
+# default_stats.json, and the Mistral tokenizer/embedder, if they are not
+# already local. You still need to edit local_nodes/config.json by hand
+# afterward to fill in the real IP address of the next node in the cycle
+# (see the README).
 
 set -euo pipefail
 
@@ -56,6 +59,13 @@ if [[ "$(uname)" == "Linux" ]]; then
 else
     /opt/homebrew/opt/openssl/bin/openssl genpkey -algorithm ed25519 -out "${LOCAL_NODES_DIR}/pk.pem"
 fi
+
+# 4. Prefetch this role's expert models, Mistral IR3DE stats, and the Mistral tokenizer/embedder.
+echo "Prefetching Hugging Face models, IR3DE stats, and Mistral embedder for role ${ROLE}..."
+python "${REPO_ROOT}/scripts/prefetch_example_models.py" \
+    --repo-root "${REPO_ROOT}" \
+    --default-stats "${REPO_ROOT}/ir3de_stats/default_stats.json" \
+    "${SCRIPT_DIR}/metadata${ROLE}.json"
 
 echo
 echo "Done. Before running this node:"

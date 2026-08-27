@@ -57,7 +57,7 @@ pip install -r requirements.txt
 
 Both options install the exact same, verified set of package versions (`requirements.txt` is the single source of truth — `requirements.yml`'s pip section just references it).
 
-**GPU note:** `torch` is listed unpinned to a specific CUDA build in both files, so `pip` picks whatever wheel matches your platform automatically — on Linux this includes CUDA support out of the box. After installing, verify GPU acceleration is actually being used:
+**GPU note:** After installing, verify GPU acceleration is actually being used:
 
 ```
 python -c "import torch; print(torch.cuda.is_available())"

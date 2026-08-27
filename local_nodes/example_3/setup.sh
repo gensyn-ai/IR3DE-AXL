@@ -2,8 +2,11 @@
 #
 # Installs example 3 (see README.md in this directory): backs up whatever config*.json/
 # metadata*.json currently sit in local_nodes/ root, copies this example's
-# own config00..07.json/metadata00..07.json there, and generates a fresh
-# ed25519 private key for each of the eight nodes.
+# own config00..07.json/metadata00..07.json there, generates a fresh
+# ed25519 private key for each of the eight nodes, and downloads this
+# example's Hugging Face expert models (and their tokenizers), the Mistral
+# IR3DE stats listed in its metadata files, and the Mistral
+# tokenizer/embedder, if they are not already local.
 #
 # This example also needs the peers to serve NO default stats, so that each
 # node's own metadata.json "stats" list is the only thing it serves (see
@@ -55,6 +58,12 @@ for nn in "${NODE_IDS[@]}"; do
         /opt/homebrew/opt/openssl/bin/openssl genpkey -algorithm ed25519 -out "${LOCAL_NODES_DIR}/pk${nn}.pem"
     fi
 done
+
+# 4. Prefetch expert models, this example's Mistral IR3DE stats, and the Mistral tokenizer/embedder.
+echo "Prefetching Hugging Face models, IR3DE stats, and Mistral embedder..."
+python "${REPO_ROOT}/scripts/prefetch_example_models.py" \
+    --repo-root "${REPO_ROOT}" \
+    "${SCRIPT_DIR}"/metadata*.json
 
 echo
 echo "Done. Run the eight nodes from ${REPO_ROOT}, each in its own terminal."
