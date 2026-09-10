@@ -9,7 +9,7 @@ ir3de_stats/. The Mistral embedder is fetched the same way runtime does
 (embedding shard only, not the full 7B weights).
 
 Usage:
-    python scripts/prefetch_example_models.py [--repo-root DIR]
+    python src/prefetch_example_models.py [--repo-root DIR]
         [--default-stats PATH] METADATA.json [METADATA.json ...]
 """
 from __future__ import annotations

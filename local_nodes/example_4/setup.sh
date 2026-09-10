@@ -62,7 +62,7 @@ fi
 
 # 4. Prefetch this role's expert models, Mistral IR3DE stats, and the Mistral tokenizer/embedder.
 echo "Prefetching Hugging Face models, IR3DE stats, and Mistral embedder for role ${ROLE}..."
-python "${REPO_ROOT}/scripts/prefetch_example_models.py" \
+python "${REPO_ROOT}/src/prefetch_example_models.py" \
     --repo-root "${REPO_ROOT}" \
     --default-stats "${REPO_ROOT}/ir3de_stats/default_stats.json" \
     "${SCRIPT_DIR}/metadata${ROLE}.json"

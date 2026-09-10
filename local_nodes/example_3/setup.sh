@@ -61,7 +61,7 @@ done
 
 # 4. Prefetch expert models, this example's Mistral IR3DE stats, and the Mistral tokenizer/embedder.
 echo "Prefetching Hugging Face models, IR3DE stats, and Mistral embedder..."
-python "${REPO_ROOT}/scripts/prefetch_example_models.py" \
+python "${REPO_ROOT}/src/prefetch_example_models.py" \
     --repo-root "${REPO_ROOT}" \
     "${SCRIPT_DIR}"/metadata*.json
 
